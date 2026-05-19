@@ -1,0 +1,63 @@
+# Pairwise sensing — RX node
+#
+# This node captures CSI from probe packets sent by a TX node.
+# Set peer_mac (or tx_mac substitution) to the MAC address of your TX node.
+#
+# Find TX node MAC from MQTT:
+#   mosquitto_sub -h BROKER -u USER -P PASS -t 'esphome/TX_NODE_NAME/debug' -C 5
+#
+# For receiving from multiple TX nodes, use peer_macs (list) instead of peer_mac.
+#
+# Compatible hardware: any ESP32 variant
+# For RX + TX simultaneously (relay node): prefer ESP32-C5 or C6
+
+substitutions:
+  node_name: "csi-rx"
+  friendly_name: "CSI RX Node"
+  tx_mac: "AA:BB:CC:DD:EE:FF"   # <-- replace with your TX node MAC
+
+esphome:
+  name: ${node_name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+    version: recommended
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [ espectre ]
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+mqtt:
+  broker: !secret mqtt_broker
+  username: !secret mqtt_username
+  password: !secret mqtt_password
+  topic_prefix: esphome/${node_name}
+
+espectre:
+  id: espectre_csi
+  peer_mac: ${tx_mac}
+
+  # To receive from multiple TX nodes, replace peer_mac with:
+  # peer_macs:
+  #   - "AA:BB:CC:DD:EE:FF"   # TX node 1
+  #   - "11:22:33:44:55:66"   # TX node 2
+
+  movement_sensor:
+    name: "Movement Score"
+  breathing_sensor:
+    name: "Breathing Score"
+  breathing_rate_sensor:
+    name: "Breathing Rate"
+  presence_sensor:
+    name: "Presence Detected"
+  motion_sensor:
+    name: "Motion Detected"

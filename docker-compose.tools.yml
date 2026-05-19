@@ -1,0 +1,80 @@
+# CSI lab tooling — persistent logger and one-shot tools.
+#
+# Common commands:
+#   docker compose -f docker-compose.tools.yml up -d csi-logger-session
+#   docker compose -f docker-compose.tools.yml logs -f csi-logger-session
+#   docker compose -f docker-compose.tools.yml run --rm mesh-monitor
+#   docker compose -f docker-compose.tools.yml run --rm lab-session start --room kuchyn --activity presence
+#   docker compose -f docker-compose.tools.yml run --rm multinode-ml --analyze
+
+services:
+  csi-logger-session:
+    build:
+      context: .
+      dockerfile: Dockerfile.tools
+    container_name: csi-logger-session
+    network_mode: host
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - .:/app
+      - /tmp:/tmp
+    environment:
+      - MQTT_BROKER=${MQTT_BROKER:-localhost}
+      - MQTT_USER=${MQTT_USER:-}
+      - MQTT_PASS=${MQTT_PASS:-}
+    command: python -u csi_logger.py --session
+
+  mesh-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile.tools
+    network_mode: host
+    working_dir: /app
+    profiles: ["tools"]
+    volumes:
+      - .:/app
+      - /tmp:/tmp
+    command: python -u mesh_monitor.py
+    stdin_open: true
+    tty: true
+
+  lab-session:
+    build:
+      context: .
+      dockerfile: Dockerfile.tools
+    network_mode: host
+    working_dir: /app
+    profiles: ["tools"]
+    volumes:
+      - .:/app
+      - /tmp:/tmp
+    entrypoint: ["python", "lab_session.py"]
+
+  multinode-ml:
+    build:
+      context: .
+      dockerfile: Dockerfile.tools
+    network_mode: host
+    working_dir: /app
+    profiles: ["tools"]
+    volumes:
+      - .:/app
+      - /tmp:/tmp
+    entrypoint: ["python", "train_multinode_ml.py"]
+
+  ml-inference:
+    build:
+      context: .
+      dockerfile: Dockerfile.tools
+    container_name: ml-inference
+    network_mode: host
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      - MQTT_BROKER=${MQTT_BROKER:-localhost}
+      - MQTT_USER=${MQTT_USER:-}
+      - MQTT_PASS=${MQTT_PASS:-}
+    command: python -u ml_inference_service.py

@@ -1,0 +1,10 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1
+
+COPY requirements-tools.txt /tmp/requirements-tools.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-tools.txt
+
+CMD ["python", "csi_logger.py", "--session"]

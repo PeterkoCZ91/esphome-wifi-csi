@@ -1,0 +1,685 @@
+/*
+ * ESPectre - Traffic Generator Manager Implementation
+ * 
+ * Manages traffic generator for CSI packet generation.
+ * Supports three modes:
+ *   - DNS: UDP queries to gateway:53 (default, lower overhead)
+ *   - Ping: ICMP echo to gateway (more compatible with all routers)
+ *   - ESP-NOW: broadcast frames for pairwise CSI sensing
+ * 
+ * Author: Francesco Pace <francesco.pace@gmail.com>
+ * License: GPLv3
+ */
+
+#include "traffic_generator_manager.h"
+#include "esphome/core/log.h"
+#include "esp_now.h"
+#include "esp_wifi.h"
+#include "esp_timer.h"
+#include "esp_netif.h"
+#include "lwip/sockets.h"
+#include "lwip/inet.h"
+#include "lwip/ip_addr.h"
+#include <cstring>
+
+namespace esphome {
+namespace espectre {
+
+static const char *TAG = "TrafficGen";
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Get gateway IP address from network interface
+ * 
+ * @param out_gw Output gateway address
+ * @return true if gateway IP was obtained successfully
+ */
+static bool get_gateway_ip(esp_ip4_addr_t* out_gw) {
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (!netif) {
+        ESP_LOGE(TAG, "Failed to get network interface");
+        return false;
+    }
+    
+    esp_netif_ip_info_t ip_info;
+    if (esp_netif_get_ip_info(netif, &ip_info) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get IP info");
+        return false;
+    }
+    
+    if (ip_info.gw.addr == 0) {
+        ESP_LOGE(TAG, "Gateway IP not available");
+        return false;
+    }
+    
+    *out_gw = ip_info.gw;
+    return true;
+}
+
+// Minimal DNS query for root domain (type A)
+// 17 bytes - smallest valid DNS query that generates a response
+static const uint8_t DNS_QUERY[] = {
+    0x00, 0x01,  // Transaction ID
+    0x01, 0x00,  // Flags: standard query
+    0x00, 0x01,  // Questions: 1
+    0x00, 0x00,  // Answer RRs: 0
+    0x00, 0x00,  // Authority RRs: 0
+    0x00, 0x00,  // Additional RRs: 0
+    0x00,        // Root domain (empty label)
+    0x00, 0x01,  // Type: A
+    0x00, 0x01   // Class: IN
+};
+
+// ============================================================================
+// PUBLIC API
+// ============================================================================
+
+void TrafficGeneratorManager::init(uint32_t rate_pps, TrafficGeneratorMode mode) {
+  task_handle_ = nullptr;
+  sock_ = -1;
+  ping_handle_ = nullptr;
+  rate_pps_ = rate_pps;
+  mode_ = mode;
+  running_.store(false);
+  
+  const char* mode_str = "dns";
+  if (mode == TrafficGeneratorMode::PING) {
+    mode_str = "ping";
+  } else if (mode == TrafficGeneratorMode::ESPNOW) {
+    mode_str = "espnow";
+  } else if (mode == TrafficGeneratorMode::UDP) {
+    mode_str = "udp";
+  }
+  ESP_LOGD(TAG, "Traffic Generator Manager initialized (rate: %u pps, mode: %s)", rate_pps, mode_str);
+}
+
+bool TrafficGeneratorManager::start() {
+  if (running_.load()) {
+    ESP_LOGW(TAG, "Traffic generator already running");
+    return false;
+  }
+  
+  // Validate rate
+  if (rate_pps_ == 0) {
+    ESP_LOGE(TAG, "Invalid rate: 0 pps (must be > 0)");
+    return false;
+  }
+  
+  // Start based on mode
+  if (mode_ == TrafficGeneratorMode::PING) {
+    return start_ping_();
+  } else if (mode_ == TrafficGeneratorMode::ESPNOW) {
+    return start_espnow_();
+  } else if (mode_ == TrafficGeneratorMode::UDP) {
+    return start_udp_();
+  } else {
+    return start_dns_();
+  }
+}
+
+void TrafficGeneratorManager::pause() {
+  if (!paused_.load()) {
+    paused_.store(true);
+    ESP_LOGD(TAG, "Traffic generator paused");
+  }
+}
+
+void TrafficGeneratorManager::resume() {
+  if (paused_.load()) {
+    paused_.store(false);
+    ESP_LOGD(TAG, "Traffic generator resumed");
+  }
+}
+
+void TrafficGeneratorManager::stop() {
+  if (!running_.load()) {
+    return;
+  }
+  
+  running_.store(false);
+  
+  // Stop based on mode
+  if (mode_ == TrafficGeneratorMode::PING) {
+    stop_ping_();
+  } else if (mode_ == TrafficGeneratorMode::ESPNOW) {
+    stop_espnow_();
+  } else if (mode_ == TrafficGeneratorMode::UDP) {
+    stop_udp_();
+  } else {
+    stop_dns_();
+  }
+  
+  ESP_LOGI(TAG, "Traffic generator stopped");
+}
+
+
+// ============================================================================
+// DNS MODE IMPLEMENTATION
+// ============================================================================
+
+bool TrafficGeneratorManager::start_dns_() {
+  // Get gateway IP address
+  esp_ip4_addr_t gw;
+  if (!get_gateway_ip(&gw)) {
+    return false;
+  }
+  
+  // Log gateway IP
+  char gw_str[16];
+  snprintf(gw_str, sizeof(gw_str), IPSTR, IP2STR(&gw));
+  ESP_LOGI(TAG, "Target gateway: %s", gw_str);
+  
+  // Create UDP socket
+  sock_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  if (sock_ < 0) {
+    ESP_LOGE(TAG, "Failed to create socket");
+    return false;
+  }
+  
+  // Set socket to non-blocking mode for fire-and-forget operation
+  int flags = fcntl(sock_, F_GETFL, 0);
+  if (fcntl(sock_, F_SETFL, flags | O_NONBLOCK) < 0) {
+    ESP_LOGW(TAG, "Failed to set socket non-blocking (continuing anyway)");
+  }
+  
+  // Reset counters
+  running_.store(true);
+  
+  // Create FreeRTOS task
+  // Stack size: 4096 bytes (increased for safety)
+  // Priority: 5 (medium priority, same as other network tasks)
+  BaseType_t result = xTaskCreate(
+      dns_traffic_task_,
+      "traffic_gen",
+      4096,
+      this,
+      5,
+      &task_handle_
+  );
+  
+  if (result != pdPASS) {
+    ESP_LOGE(TAG, "Failed to create traffic generator task (result: %d)", result);
+    close(sock_);
+    sock_ = -1;
+    running_.store(false);
+    return false;
+  }
+  
+  // Give task time to start
+  vTaskDelay(pdMS_TO_TICKS(100));
+  
+  uint32_t interval_ms = 1000 / rate_pps_;
+  ESP_LOGI(TAG, "Traffic generator started (mode: dns, %u pps, interval: %u ms)", 
+           rate_pps_, interval_ms);
+  
+  return true;
+}
+
+void TrafficGeneratorManager::stop_dns_() {
+  // Wait for task to finish (max 1 second)
+  if (task_handle_) {
+    for (int i = 0; i < 10 && eTaskGetState(task_handle_) != eDeleted; i++) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    task_handle_ = nullptr;
+  }
+  
+  // Close socket
+  if (sock_ >= 0) {
+    close(sock_);
+    sock_ = -1;
+  }
+}
+
+void TrafficGeneratorManager::dns_traffic_task_(void* arg) {
+  TrafficGeneratorManager* mgr = static_cast<TrafficGeneratorManager*>(arg);
+  if (!mgr) {
+    ESP_LOGE(TAG, "Invalid manager pointer");
+    vTaskDelete(NULL);
+    return;
+  }
+  
+  // Get gateway address
+  esp_ip4_addr_t gw;
+  if (!get_gateway_ip(&gw)) {
+    ESP_LOGE(TAG, "Failed to get gateway in task");
+    // Keep manager state coherent if task exits unexpectedly.
+    mgr->running_.store(false);
+    vTaskDelete(NULL);
+    return;
+  }
+  
+  // Setup destination address (gateway:53 for DNS)
+  struct sockaddr_in dest_addr;
+  memset(&dest_addr, 0, sizeof(dest_addr));
+  dest_addr.sin_family = AF_INET;
+  dest_addr.sin_port = htons(53);  // DNS port
+  dest_addr.sin_addr.s_addr = gw.addr;
+  
+  // Use microseconds for precise timing with fractional accumulator
+  // This compensates for integer division error (e.g., 1000000/400 = 2500µs exact)
+  const uint32_t interval_us = 1000000 / mgr->rate_pps_;  // Base interval in microseconds
+  const uint32_t remainder_us = 1000000 % mgr->rate_pps_; // Remainder to distribute
+  uint32_t accumulator = 0;  // Accumulates fractional microseconds
+  
+  ESP_LOGI(TAG, "Traffic task started (gateway: " IPSTR ", interval: %u µs, remainder: %u)", 
+           IP2STR(&gw), interval_us, remainder_us);
+  
+  int64_t next_send_time = esp_timer_get_time();
+  
+  // Error state for rate-limited logging
+  SendErrorState error_state;
+  
+  while (mgr->running_.load()) {
+    // Check if paused (e.g., during calibration)
+    if (mgr->paused_.load()) {
+      vTaskDelay(pdMS_TO_TICKS(50));  // Sleep while paused to save CPU
+      next_send_time = esp_timer_get_time();  // Reset timing on resume
+      continue;
+    }
+    
+    // Send DNS query to gateway
+    ssize_t sent = sendto(
+        mgr->sock_,
+        DNS_QUERY,
+        sizeof(DNS_QUERY),
+        0,
+        (struct sockaddr*)&dest_addr,
+        sizeof(dest_addr)
+    );
+    
+    if (sent <= 0) {
+      // Handle error with rate-limited logging
+      bool needs_backoff = handle_send_error(error_state, sent, errno, esp_timer_get_time());
+      
+      // Adaptive backoff on ENOMEM: give WiFi stack time to recover
+      // This commonly happens during SPIFFS operations (calibration) which compete
+      // for memory with the LwIP network stack.
+      if (needs_backoff) {
+        vTaskDelay(pdMS_TO_TICKS(5));  // 5ms backoff on memory pressure
+      }
+    }
+    
+    // Calculate next send time with fractional accumulator for precise rate
+    accumulator += remainder_us;
+    uint32_t extra_us = accumulator / mgr->rate_pps_;
+    accumulator %= mgr->rate_pps_;
+    
+    next_send_time += interval_us + extra_us;
+    
+    // Sleep until next send time
+    int64_t now = esp_timer_get_time();
+    int64_t sleep_us = next_send_time - now;
+    
+    if (sleep_us > 0) {
+      // Convert to ticks (round up to avoid drift)
+      TickType_t sleep_ticks = pdMS_TO_TICKS((sleep_us + 999) / 1000);
+      if (sleep_ticks > 0) {
+        vTaskDelay(sleep_ticks);
+      }
+    } else if (sleep_us < -100000) {
+      // We're more than 100ms behind, reset timing
+      next_send_time = esp_timer_get_time();
+    }
+  }
+  
+  ESP_LOGI(TAG, "DNS traffic task stopped");
+  vTaskDelete(NULL);
+}
+
+// ============================================================================
+// UDP MODE IMPLEMENTATION
+// ============================================================================
+
+bool TrafficGeneratorManager::start_udp_() {
+  if (udp_host_.empty()) {
+    ESP_LOGE(TAG, "UDP mode requires traffic_generator_udp_host");
+    return false;
+  }
+
+  // Resolve target IP
+  struct in_addr target_addr;
+  if (inet_aton(udp_host_.c_str(), &target_addr) == 0) {
+    ESP_LOGE(TAG, "UDP: invalid host '%s'", udp_host_.c_str());
+    return false;
+  }
+
+  sock_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  if (sock_ < 0) {
+    ESP_LOGE(TAG, "UDP: failed to create socket");
+    return false;
+  }
+
+  int flags = fcntl(sock_, F_GETFL, 0);
+  if (fcntl(sock_, F_SETFL, flags | O_NONBLOCK) < 0) {
+    ESP_LOGW(TAG, "UDP: failed to set non-blocking (continuing anyway)");
+  }
+
+  running_.store(true);
+
+  BaseType_t result = xTaskCreate(
+      udp_traffic_task_,
+      "csi_udp_tx",
+      4096,
+      this,
+      5,
+      &task_handle_
+  );
+
+  if (result != pdPASS) {
+    ESP_LOGE(TAG, "UDP: failed to create task (result: %d)", result);
+    close(sock_);
+    sock_ = -1;
+    running_.store(false);
+    return false;
+  }
+
+  vTaskDelay(pdMS_TO_TICKS(100));
+  ESP_LOGI(TAG, "Traffic generator started (mode: udp, %u pps → %s:%u)",
+           rate_pps_, udp_host_.c_str(), udp_port_);
+  return true;
+}
+
+void TrafficGeneratorManager::stop_udp_() {
+  if (task_handle_) {
+    for (int i = 0; i < 10 && eTaskGetState(task_handle_) != eDeleted; i++) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    task_handle_ = nullptr;
+  }
+  if (sock_ >= 0) {
+    close(sock_);
+    sock_ = -1;
+  }
+}
+
+// Fixed 100-byte payload — large enough for reliable HT/VHT frame generation
+static const uint8_t UDP_PAYLOAD[100] = {0};
+
+void TrafficGeneratorManager::udp_traffic_task_(void* arg) {
+  TrafficGeneratorManager* mgr = static_cast<TrafficGeneratorManager*>(arg);
+  if (!mgr) {
+    vTaskDelete(NULL);
+    return;
+  }
+
+  struct in_addr target_ip;
+  if (inet_aton(mgr->udp_host_.c_str(), &target_ip) == 0) {
+    ESP_LOGE(TAG, "UDP task: invalid host");
+    mgr->running_.store(false);
+    vTaskDelete(NULL);
+    return;
+  }
+
+  struct sockaddr_in dest_addr;
+  memset(&dest_addr, 0, sizeof(dest_addr));
+  dest_addr.sin_family = AF_INET;
+  dest_addr.sin_port = htons(mgr->udp_port_);
+  dest_addr.sin_addr = target_ip;
+
+  const uint32_t interval_us = 1000000 / mgr->rate_pps_;
+  const uint32_t remainder_us = 1000000 % mgr->rate_pps_;
+  uint32_t accumulator = 0;
+
+  ESP_LOGI(TAG, "UDP task started (%s:%u, interval: %u µs)",
+           mgr->udp_host_.c_str(), mgr->udp_port_, interval_us);
+
+  int64_t next_send_time = esp_timer_get_time();
+  SendErrorState error_state;
+
+  while (mgr->running_.load()) {
+    if (mgr->paused_.load()) {
+      vTaskDelay(pdMS_TO_TICKS(50));
+      next_send_time = esp_timer_get_time();
+      continue;
+    }
+
+    ssize_t sent = sendto(
+        mgr->sock_,
+        UDP_PAYLOAD,
+        sizeof(UDP_PAYLOAD),
+        0,
+        (struct sockaddr*)&dest_addr,
+        sizeof(dest_addr)
+    );
+
+    if (sent <= 0) {
+      bool needs_backoff = handle_send_error(error_state, sent, errno, esp_timer_get_time());
+      if (needs_backoff) {
+        vTaskDelay(pdMS_TO_TICKS(5));
+      }
+    }
+
+    accumulator += remainder_us;
+    uint32_t extra_us = accumulator / mgr->rate_pps_;
+    accumulator %= mgr->rate_pps_;
+    next_send_time += interval_us + extra_us;
+
+    int64_t now = esp_timer_get_time();
+    int64_t sleep_us = next_send_time - now;
+    if (sleep_us > 0) {
+      TickType_t sleep_ticks = pdMS_TO_TICKS((sleep_us + 999) / 1000);
+      if (sleep_ticks > 0) {
+        vTaskDelay(sleep_ticks);
+      }
+    } else if (sleep_us < -100000) {
+      next_send_time = esp_timer_get_time();
+    }
+  }
+
+  ESP_LOGI(TAG, "UDP traffic task stopped");
+  vTaskDelete(NULL);
+}
+
+// ============================================================================
+// PING MODE IMPLEMENTATION
+// ============================================================================
+
+// Ping callbacks (required by esp_ping API but we don't need the data)
+void TrafficGeneratorManager::ping_success_cb_(esp_ping_handle_t hdl, void *args) {
+  // Ping reply received - CSI was generated, nothing else to do
+}
+
+void TrafficGeneratorManager::ping_timeout_cb_(esp_ping_handle_t hdl, void *args) {
+  // Ping timeout - still generates CSI on TX, just no reply
+  // This is fine for our purposes
+}
+
+void TrafficGeneratorManager::ping_end_cb_(esp_ping_handle_t hdl, void *args) {
+  // Ping session ended (only called if count is finite)
+}
+
+bool TrafficGeneratorManager::start_ping_() {
+  // Get gateway IP address
+  esp_ip4_addr_t gw;
+  if (!get_gateway_ip(&gw)) {
+    return false;
+  }
+  
+  // Log gateway IP
+  char gw_str[16];
+  snprintf(gw_str, sizeof(gw_str), IPSTR, IP2STR(&gw));
+  ESP_LOGI(TAG, "Target gateway: %s", gw_str);
+  
+  // Configure ping session
+  esp_ping_config_t ping_config = ESP_PING_DEFAULT_CONFIG();
+  
+  // Set target address
+  ip_addr_t target_addr;
+  IP_ADDR4(&target_addr, 
+           ip4_addr1(&gw), 
+           ip4_addr2(&gw), 
+           ip4_addr3(&gw), 
+           ip4_addr4(&gw));
+  ping_config.target_addr = target_addr;
+  
+  // Configure timing
+  ping_config.count = ESP_PING_COUNT_INFINITE;  // Run forever
+  ping_config.interval_ms = 1000 / rate_pps_;   // Interval based on rate
+  ping_config.timeout_ms = 1000;                // 1 second timeout
+  ping_config.data_size = 0;                    // No payload (header only, smallest possible)
+  ping_config.task_stack_size = 2560;           // Stack size for ping task
+  ping_config.task_prio = 5;                    // Same priority as DNS mode
+  
+  // Setup callbacks
+  esp_ping_callbacks_t cbs = {
+    .cb_args = this,
+    .on_ping_success = ping_success_cb_,
+    .on_ping_timeout = ping_timeout_cb_,
+    .on_ping_end = ping_end_cb_,
+  };
+  
+  // Create ping session
+  esp_err_t ret = esp_ping_new_session(&ping_config, &cbs, &ping_handle_);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to create ping session: %s", esp_err_to_name(ret));
+    return false;
+  }
+  
+  // Start ping session
+  ret = esp_ping_start(ping_handle_);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to start ping session: %s", esp_err_to_name(ret));
+    esp_ping_delete_session(ping_handle_);
+    ping_handle_ = nullptr;
+    return false;
+  }
+  
+  running_.store(true);
+  
+  uint32_t interval_ms = 1000 / rate_pps_;
+  ESP_LOGI(TAG, "Traffic generator started (mode: ping, %u pps, interval: %u ms)", 
+           rate_pps_, interval_ms);
+  
+  return true;
+}
+
+void TrafficGeneratorManager::stop_ping_() {
+  if (ping_handle_) {
+    esp_ping_stop(ping_handle_);
+    esp_ping_delete_session(ping_handle_);
+    ping_handle_ = nullptr;
+  }
+}
+
+// ============================================================================
+// ESP-NOW MODE IMPLEMENTATION
+// ============================================================================
+
+bool TrafficGeneratorManager::pre_init() {
+  if (mode_ != TrafficGeneratorMode::ESPNOW || espnow_initialized_) return true;
+
+  esp_err_t err = esp_now_init();
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "esp_now_init (pre-CSI) failed: %s", esp_err_to_name(err));
+    return false;
+  }
+
+  esp_now_peer_info_t peer = {};
+  memset(peer.peer_addr, 0xFF, 6);
+  peer.channel = 0;
+  peer.encrypt = false;
+  peer.ifidx = WIFI_IF_STA;
+
+  err = esp_now_add_peer(&peer);
+  if (err != ESP_OK && err != ESP_ERR_ESPNOW_EXIST) {
+    ESP_LOGE(TAG, "esp_now_add_peer (pre-CSI) failed: %s", esp_err_to_name(err));
+    esp_now_deinit();
+    return false;
+  }
+
+  espnow_initialized_ = true;
+  ESP_LOGI(TAG, "ESP-NOW pre-initialized before CSI enable");
+  return true;
+}
+
+bool TrafficGeneratorManager::start_espnow_() {
+  if (!espnow_initialized_) {
+    // Fallback if pre_init() was not called — may conflict with CSI on ESP32-C5
+    ESP_LOGW(TAG, "ESP-NOW not pre-initialized, calling init here");
+    esp_err_t err = esp_now_init();
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "esp_now_init failed: %s", esp_err_to_name(err));
+      return false;
+    }
+
+    esp_now_peer_info_t peer = {};
+    memset(peer.peer_addr, 0xFF, 6);
+    peer.channel = 0;  // Use current WiFi channel.
+    peer.encrypt = false;
+    peer.ifidx = WIFI_IF_STA;
+
+    err = esp_now_add_peer(&peer);
+    if (err != ESP_OK && err != ESP_ERR_ESPNOW_EXIST) {
+      ESP_LOGE(TAG, "esp_now_add_peer failed: %s", esp_err_to_name(err));
+      esp_now_deinit();
+      return false;
+    }
+
+    espnow_initialized_ = true;
+    ESP_LOGI(TAG, "ESP-NOW initialized, broadcast peer added");
+  }
+
+  running_.store(true);
+
+  BaseType_t result = xTaskCreatePinnedToCore(
+      espnow_traffic_task_,
+      "espnow_tx",
+      2048,
+      this,
+      5,
+      &task_handle_,
+      0
+  );
+
+  if (result != pdPASS) {
+    ESP_LOGE(TAG, "Failed to create ESP-NOW task (result: %d)", result);
+    running_.store(false);
+    esp_now_deinit();
+    espnow_initialized_ = false;
+    return false;
+  }
+
+  ESP_LOGI(TAG, "ESP-NOW traffic task started at %u pps", rate_pps_);
+  return true;
+}
+
+void TrafficGeneratorManager::stop_espnow_() {
+  if (task_handle_ != nullptr) {
+    vTaskDelete(task_handle_);
+    task_handle_ = nullptr;
+  }
+
+  if (espnow_initialized_) {
+    esp_now_deinit();
+    espnow_initialized_ = false;
+    ESP_LOGI(TAG, "ESP-NOW deinitialized");
+  }
+}
+
+void TrafficGeneratorManager::espnow_traffic_task_(void* arg) {
+  TrafficGeneratorManager* mgr = static_cast<TrafficGeneratorManager*>(arg);
+  if (!mgr) {
+    ESP_LOGE(TAG, "Invalid manager pointer");
+    vTaskDelete(NULL);
+    return;
+  }
+
+  const uint32_t delay_ms = (mgr->rate_pps_ > 0) ? (1000U / mgr->rate_pps_) : 100U;
+  static const uint8_t payload[1] = {0xC5};
+
+  while (mgr->running_.load()) {
+    if (!mgr->paused_.load()) {
+      esp_now_send(nullptr, payload, sizeof(payload));
+    }
+    vTaskDelay(pdMS_TO_TICKS(delay_ms > 0 ? delay_ms : 1));
+  }
+
+  vTaskDelete(NULL);
+}
+
+}  // namespace espectre
+}  // namespace esphome

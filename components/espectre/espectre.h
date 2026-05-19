@@ -1,0 +1,310 @@
+/*
+ * ESPectre - Main Component
+ *
+ * Main ESPHome component that orchestrates all ESPectre subsystems.
+ * Integrates CSI processing, calibration, and Home Assistant publishing.
+ *
+ * Author: Francesco Pace <francesco.pace@gmail.com>
+ * License: GPLv3
+ */
+
+#pragma once
+
+#include "esphome/core/component.h"
+#include "esphome/core/log.h"
+#include "esphome/core/preferences.h"
+#include "esphome/components/sensor/sensor.h"
+#include "esphome/components/binary_sensor/binary_sensor.h"
+#include "esphome/components/number/number.h"
+#include "esphome/components/switch/switch.h"
+
+// Include ESP-IDF WiFi headers
+#include "esp_wifi.h"
+#include "esp_err.h"
+#include "esp_event.h"
+
+// Include C++ modules
+#include "utils.h"
+#include "threshold.h"
+#include "base_detector.h"
+#include "mvs_detector.h"
+#include "ml_detector.h"
+#include "sensor_publisher.h"
+#include "csi_manager.h"
+#include "wifi_lifecycle.h"
+#include "nbvi_calibrator.h"
+#include "traffic_generator_manager.h"
+#include "udp_listener.h"
+
+namespace esphome {
+namespace esp32_ble_server {
+class BLEServer;
+class BLECharacteristic;
+}  // namespace esp32_ble_server
+}  // namespace esphome
+
+namespace esphome {
+namespace espectre {
+
+static const char *const TAG = "espectre";
+
+class ESpectreComponent : public Component {
+ public:
+  void setup() override;
+  void loop() override;
+  ~ESpectreComponent();
+  void dump_config() override;
+  float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
+
+
+  // Detection algorithm enum
+  enum class DetectionAlgorithm {
+    MVS,   // Moving Variance Segmentation (default)
+    ML     // Machine Learning (MLP neural network)
+  };
+
+
+  // Setters for YAML configuration
+  void set_segmentation_threshold(float threshold) {
+    this->segmentation_threshold_ = threshold;
+    this->threshold_mode_ = ThresholdMode::MANUAL;
+  }
+  void set_threshold_mode(const std::string &mode) {
+    if (mode == "min") {
+      this->threshold_mode_ = ThresholdMode::MIN;
+    } else {
+      this->threshold_mode_ = ThresholdMode::AUTO;  // default
+    }
+  }
+  void set_segmentation_window_size(uint16_t size) { this->segmentation_window_size_ = size; }
+  void set_traffic_generator_rate(uint32_t rate) { this->traffic_generator_rate_ = rate; }
+  void set_traffic_generator_mode(const std::string &mode) {
+    if (mode == "ping") {
+      this->traffic_generator_mode_ = TrafficGeneratorMode::PING;
+    } else if (mode == "espnow") {
+      this->traffic_generator_mode_ = TrafficGeneratorMode::ESPNOW;
+    } else if (mode == "udp") {
+      this->traffic_generator_mode_ = TrafficGeneratorMode::UDP;
+    } else {
+      this->traffic_generator_mode_ = TrafficGeneratorMode::DNS;
+    }
+  }
+  void set_traffic_generator_udp_host(const std::string &host) { this->traffic_generator_.set_udp_host(host); }
+  void set_traffic_generator_udp_port(uint16_t port) { this->traffic_generator_.set_udp_port(port); }
+  void set_gain_lock_mode(const std::string &mode) {
+    if (mode == "enabled") {
+      this->gain_lock_mode_ = GainLockMode::ENABLED;
+    } else if (mode == "disabled") {
+      this->gain_lock_mode_ = GainLockMode::DISABLED;
+    } else {
+      this->gain_lock_mode_ = GainLockMode::AUTO;  // default
+    }
+  }
+  void set_detection_algorithm(const std::string &algo) {
+    if (algo == "ml") {
+      this->detection_algorithm_ = DetectionAlgorithm::ML;
+    } else {
+      this->detection_algorithm_ = DetectionAlgorithm::MVS;  // default
+    }
+  }
+  void set_publish_interval(uint32_t interval) { this->publish_interval_ = interval; }
+  void set_lowpass_enabled(bool enabled) { this->lowpass_enabled_ = enabled; }
+  void set_lowpass_cutoff(float cutoff) { this->lowpass_cutoff_ = cutoff; }
+  void set_hampel_enabled(bool enabled) { this->hampel_enabled_ = enabled; }
+  void set_hampel_window(uint8_t window) { this->hampel_window_ = window; }
+  void set_hampel_threshold(float threshold) { this->hampel_threshold_ = threshold; }
+  void set_hysteresis_factor(float factor) { this->hysteresis_factor_ = factor; }
+
+  // Auto-calibration: trigger once when environment is quiet for N minutes
+  void set_auto_calibration_enabled(bool enabled) { this->auto_cal_enabled_ = enabled; }
+  void set_auto_calibration_minutes(uint32_t minutes) { this->auto_cal_quiet_seconds_ = minutes * 60; }
+
+  void set_ble_channel_enabled(bool enabled) { this->ble_channel_enabled_ = enabled; }
+  void set_ble_telemetry_interval_ms(uint32_t interval_ms) { this->ble_telemetry_interval_ms_ = interval_ms; }
+  void set_ble_server(esp32_ble_server::BLEServer *server) { this->ble_server_ = server; }
+  void set_ble_telemetry_characteristic(esp32_ble_server::BLECharacteristic *characteristic) {
+    this->ble_telemetry_char_ = characteristic;
+  }
+  void set_ble_sysinfo_characteristic(esp32_ble_server::BLECharacteristic *characteristic) {
+    this->ble_sysinfo_char_ = characteristic;
+  }
+  void set_ble_control_characteristic(esp32_ble_server::BLECharacteristic *characteristic) {
+    this->ble_control_char_ = characteristic;
+  }
+
+  // Peer MAC for pairwise/mesh sensing — "AA:BB:CC:DD:EE:FF"
+  void set_peer_mac(const std::string &mac_str) {
+    uint8_t mac[6];
+    if (sscanf(mac_str.c_str(), "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+               &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) == 6) {
+      memcpy(peer_mac_, mac, 6);
+      has_peer_mac_ = true;
+      has_peer_mac_accept_broadcast_ = true;
+      has_peer_mac_accept_ap_bssid_ = true;
+    }
+  }
+
+  // Additional peer MACs for multi-TX mesh — each "AA:BB:CC:DD:EE:FF"
+  void add_peer_mac(const std::string &mac_str) {
+    uint8_t mac[6];
+    if (sscanf(mac_str.c_str(), "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+               &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) == 6) {
+      extra_peer_macs_.push_back({mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]});
+      if (!has_peer_mac_) {
+        memcpy(peer_mac_, mac, 6);
+        has_peer_mac_ = true;
+        has_peer_mac_accept_broadcast_ = true;
+        has_peer_mac_accept_ap_bssid_ = true;
+        extra_peer_macs_.pop_back();
+      }
+    }
+  }
+
+  // Subcarrier selection (optional, defaults to auto-calibrated or DEFAULT_SUBCARRIERS)
+  void set_selected_subcarriers(const std::vector<uint8_t> &subcarriers) {
+    size_t count = std::min(subcarriers.size(), (size_t)12);
+    for (size_t i = 0; i < count; i++) {
+      this->selected_subcarriers_[i] = subcarriers[i];
+    }
+    this->user_specified_subcarriers_ = true;  // Mark as user-specified
+  }
+
+  // Setters for ESPHome sensors (delegated to SensorPublisher)
+  void set_movement_sensor(sensor::Sensor *sensor) { this->sensor_publisher_.set_movement_sensor(sensor); }
+  void set_motion_binary_sensor(binary_sensor::BinarySensor *sensor) { this->sensor_publisher_.set_motion_binary_sensor(sensor); }
+  void set_breathing_sensor(sensor::Sensor *sensor) { this->sensor_publisher_.set_breathing_sensor(sensor); }
+  void set_phase_turbulence_sensor(sensor::Sensor *sensor) { this->sensor_publisher_.set_phase_turbulence_sensor(sensor); }
+  void set_presence_binary_sensor(binary_sensor::BinarySensor *sensor) { this->sensor_publisher_.set_presence_binary_sensor(sensor); }
+  void set_dser_sensor(sensor::Sensor *sensor) { this->sensor_publisher_.set_dser_sensor(sensor); }
+  void set_plcr_sensor(sensor::Sensor *sensor) { this->sensor_publisher_.set_plcr_sensor(sensor); }
+  void set_breathing_rate_sensor(sensor::Sensor *sensor) { this->sensor_publisher_.set_breathing_rate_sensor(sensor); }
+
+  // Setter for threshold number control
+  void set_threshold_number(number::Number *num) { this->threshold_number_ = num; }
+
+  // Runtime threshold adjustment (called from HA via number component)
+  void set_threshold_runtime(float threshold);
+  float get_threshold() const { return this->segmentation_threshold_; }
+
+  // Runtime calibration trigger (called from HA via switch component)
+  void trigger_recalibration();
+
+  // Check if calibration is in progress
+  bool is_calibrating() const {
+    return this->nbvi_calibrator_.is_calibrating();
+  }
+
+  // Setter for calibrate switch control
+  void set_calibrate_switch(switch_::Switch *sw) { this->calibrate_switch_ = sw; }
+
+  // Public detector access (for lambda template sensors)
+  BaseDetector* get_detector() const { return this->detector_; }
+  CSIManager* get_csi_manager() { return &this->csi_manager_; }
+  const CSIManager* get_csi_manager() const { return &this->csi_manager_; }
+
+ protected:
+  // Start band/baseline calibration (shared by boot and runtime trigger)
+  void start_calibration_();
+  // WiFi lifecycle callbacks
+  void on_wifi_connected_();
+  void on_wifi_disconnected_();
+
+  // Send system info over BLE (for game display)
+  void send_system_info_ble_();
+  // BLE callbacks and control command parser
+  void on_ble_client_connected_(uint16_t conn_id);
+  void on_ble_client_disconnected_(uint16_t conn_id);
+  void handle_ble_control_command_(const std::string &command);
+
+  // Motion detector
+  BaseDetector* detector_{nullptr};
+  MVSDetector mvs_detector_;
+  MLDetector ml_detector_;
+  DetectionAlgorithm detection_algorithm_{DetectionAlgorithm::MVS};
+  MotionState motion_state_{MotionState::IDLE};
+
+  // Configuration from YAML
+  float segmentation_threshold_{1.0f};
+  uint16_t segmentation_window_size_{75};
+  uint32_t traffic_generator_rate_{100};
+  TrafficGeneratorMode traffic_generator_mode_{TrafficGeneratorMode::DNS};
+  GainLockMode gain_lock_mode_{GainLockMode::AUTO};
+  uint32_t publish_interval_{100};  // Publish interval in packets (default: same as traffic_generator_rate)
+  bool lowpass_enabled_{false};     // Low-pass filter disabled by default
+  float lowpass_cutoff_{11.0f};     // Default cutoff frequency in Hz
+  bool hampel_enabled_{true};
+  uint8_t hampel_window_{7};
+  float hampel_threshold_{5.0f};
+  float hysteresis_factor_{0.7f};
+  uint8_t selected_subcarriers_[12] = {
+    DEFAULT_SUBCARRIERS[0], DEFAULT_SUBCARRIERS[1], DEFAULT_SUBCARRIERS[2], DEFAULT_SUBCARRIERS[3],
+    DEFAULT_SUBCARRIERS[4], DEFAULT_SUBCARRIERS[5], DEFAULT_SUBCARRIERS[6], DEFAULT_SUBCARRIERS[7],
+    DEFAULT_SUBCARRIERS[8], DEFAULT_SUBCARRIERS[9], DEFAULT_SUBCARRIERS[10], DEFAULT_SUBCARRIERS[11]
+  };
+
+  bool user_specified_subcarriers_{false};  // True if user specified in YAML
+  ThresholdMode threshold_mode_{ThresholdMode::AUTO};  // Threshold calculation mode
+
+  // Pairwise/mesh sensing: optional peer MAC filter(s)
+  uint8_t peer_mac_[6]{};
+  bool has_peer_mac_{false};
+  bool has_peer_mac_accept_broadcast_{false};
+  bool has_peer_mac_accept_ap_bssid_{false};
+  std::vector<std::array<uint8_t, 6>> extra_peer_macs_;
+
+  // Managers (handle specific responsibilities)
+  SensorPublisher sensor_publisher_;
+  CSIManager csi_manager_;
+  WiFiLifecycleManager wifi_lifecycle_;
+  NBVICalibrator nbvi_calibrator_;          // NBVI band selection algorithm
+  TrafficGeneratorManager traffic_generator_;
+  UDPListener udp_listener_;
+
+  // BLE telemetry/control channel
+  esp32_ble_server::BLEServer *ble_server_{nullptr};
+  esp32_ble_server::BLECharacteristic *ble_telemetry_char_{nullptr};
+  esp32_ble_server::BLECharacteristic *ble_sysinfo_char_{nullptr};
+  esp32_ble_server::BLECharacteristic *ble_control_char_{nullptr};
+
+  // Number controls
+  number::Number *threshold_number_{nullptr};
+
+  // Switch controls
+  switch_::Switch *calibrate_switch_{nullptr};
+
+  // Calibration results (for diagnostics)
+  float best_pxx_{0.0f};  // Pxx from calibration (adaptive threshold = Pxx × factor)
+
+  // State flags
+  bool ready_to_publish_{false};      // True when CSI is ready and calibration done
+  bool threshold_republished_{false}; // True after threshold has been re-published to HA
+  bool ble_channel_enabled_{false};   // Enable BLE telemetry/control protocol
+  bool ble_client_connected_{false};  // At least one BLE client connected
+  uint32_t ble_telemetry_interval_ms_{40};  // BLE notify interval (throttling)
+  uint32_t last_ble_telemetry_ms_{0};  // Last telemetry notify timestamp
+
+  // Auto-calibration quiet monitor
+  bool auto_cal_enabled_{true};
+  uint32_t auto_cal_quiet_seconds_{600};  // 10 minutes default
+  bool auto_cal_done_{false};             // trigger only once per boot
+  uint32_t auto_cal_quiet_start_{0};      // unix-like seconds counter when quiet began
+
+  // Stuck-in-motion detection: auto-raise threshold if motion persists
+  uint32_t stuck_motion_count_{0};     // consecutive MOTION publish intervals
+  uint8_t stuck_raise_count_{0};       // how many times threshold was raised (max 3)
+  static constexpr uint32_t STUCK_MOTION_LIMIT = 86400;  // ~24h at 1Hz publish
+  static constexpr uint8_t STUCK_RAISE_MAX = 3;
+  static constexpr float STUCK_RAISE_FACTOR = 1.5f;
+
+  // Breathing-aware presence hold: override IDLE→MOTION when breathing detected
+  // Prevents dropping stationary person (sitting/sleeping) who shows low amplitude variance
+  // but measurable breathing-band energy and elevated phase turbulence.
+  bool presence_hold_active_{false};
+  uint16_t presence_hold_count_{0};        // consecutive intervals in hold
+  static constexpr uint16_t PRESENCE_HOLD_MAX = 300;  // ~5 min at 1Hz — auto-release safety
+  static constexpr float BREATHING_HOLD_FACTOR = 2.0f;  // breathing_score > baseline × factor
+  static constexpr float PHASE_HOLD_FACTOR = 1.5f;      // phase_turb > idle_baseline × factor
+};
+
+}  // namespace espectre
+}  // namespace esphome

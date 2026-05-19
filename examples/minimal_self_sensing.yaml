@@ -1,0 +1,45 @@
+# Minimal self-sensing node
+#
+# The node captures CSI from its own AP-link beacons (router transmissions).
+# No TX/RX peer configuration — simplest possible setup.
+#
+# Flash: esphome run examples/minimal_self_sensing.yaml
+
+substitutions:
+  node_name: "csi-presence"
+  friendly_name: "CSI Presence"
+
+esphome:
+  name: ${node_name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+    version: recommended
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [ espectre ]
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+mqtt:
+  broker: !secret mqtt_broker
+  username: !secret mqtt_username
+  password: !secret mqtt_password
+  topic_prefix: esphome/${node_name}
+
+espectre:
+  id: espectre_csi
+  movement_sensor:
+    name: "Movement Score"
+  breathing_rate_sensor:
+    name: "Breathing Rate"
+  presence_sensor:
+    name: "Presence Detected"

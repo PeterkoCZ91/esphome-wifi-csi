@@ -1,0 +1,40 @@
+.esphome/
+secrets.yaml
+__pycache__/
+*.pyc
+.venv/
+components/espectre/.esphome/
+csi_log.db
+*.db-wal
+*.db-shm
+*.out
+mesh_lab/data/*.db
+codex_task_*.md
+nabidka-*.md
+GITHUB_PREP_REVIEW.md
+.claude/
+micro-espectre/docker-compose.yml
+micro-espectre/setup.sh
+
+# Production node YAMLs — room-specific, not for public repo
+espectre-obyvak*.yaml
+espectre-pracovna*.yaml
+espectre-ezotv.yaml
+espectre-kuchyn.yaml
+espectre-loznice.yaml
+espectre-senzor.yaml
+espectre-obyvak1.yaml
+espectre-chodba.yaml
+test-c6-pairwise-atom.yaml
+CHANGELOG_2026-04-23.md
+
+# Internal notes — not for public repo
+TASKS_WIFI_CSI_MESH.md
+GITHUB_TEST_NOTES.md
+
+# Internal lab notes and dev configs
+mesh_lab/README.md
+mesh_lab/NOTES.md
+mesh_lab/TASKS.md
+mesh_lab/configs/esphome/*.yaml
+micro-espectre/config.yaml

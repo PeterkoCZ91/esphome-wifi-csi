@@ -1,0 +1,59 @@
+name: CI — ESPHome compile check
+
+on:
+  push:
+    branches: [master, main, develop]
+    paths:
+      - 'components/espectre/**'
+      - 'espectre-c5-template.yaml'
+      - 'espectre-c6-template.yaml'
+      - 'examples/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    paths:
+      - 'components/espectre/**'
+      - 'espectre-c5-template.yaml'
+      - 'espectre-c6-template.yaml'
+      - 'examples/**'
+      - '.github/workflows/ci.yml'
+  workflow_dispatch:
+
+jobs:
+  compile:
+    name: ESPHome compile
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ESPHome
+        run: pip install esphome
+
+      - name: Create secrets.yaml
+        run: |
+          cp secrets.yaml.example secrets.yaml
+          cp secrets.yaml.example examples/secrets.yaml
+          # Replace placeholder api_key with a valid base64 key for CI
+          API_KEY=$(python3 -c "import base64,os; print(base64.b64encode(os.urandom(32)).decode())")
+          sed -i "s|your_esphome_api_key_base64==|${API_KEY}|g" secrets.yaml
+          sed -i "s|your_esphome_api_key_base64==|${API_KEY}|g" examples/secrets.yaml
+
+      - name: Compile ESP32-C5 template
+        run: esphome compile espectre-c5-template.yaml
+
+      - name: Compile ESP32-C6 template
+        run: esphome compile espectre-c6-template.yaml
+
+      - name: Compile example — minimal self-sensing
+        run: esphome compile examples/minimal_self_sensing.yaml
+
+      - name: Compile example — pairwise TX
+        run: esphome compile examples/pairwise_tx_node.yaml
+
+      - name: Compile example — pairwise RX
+        run: esphome compile examples/pairwise_rx_node.yaml

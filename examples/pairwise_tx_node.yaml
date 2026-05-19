@@ -1,0 +1,49 @@
+# Pairwise sensing — TX node
+#
+# This node transmits probe packets for RX nodes to capture CSI from.
+# No peer_mac here — this node uses AP-link CSI for its own detection.
+#
+# For C5/C6 RX nodes use traffic_generator_mode: udp (not espnow).
+# See README "TX mode and PHY compatibility" section.
+#
+# Compatible hardware: any ESP32 variant (classic, C5, C6)
+# Recommended: ESP32-C5 or C6 for simultaneous TX+RX
+
+substitutions:
+  node_name: "csi-tx"
+  friendly_name: "CSI TX Node"
+
+esphome:
+  name: ${node_name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+    version: recommended
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [ espectre ]
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+mqtt:
+  broker: !secret mqtt_broker
+  username: !secret mqtt_username
+  password: !secret mqtt_password
+  topic_prefix: esphome/${node_name}
+
+espectre:
+  id: espectre_csi
+  traffic_generator_mode: espnow   # use udp for C5/C6 RX nodes
+  traffic_generator_rate: 200
+  movement_sensor:
+    name: "Movement Score"
+  presence_sensor:
+    name: "Presence Detected"
