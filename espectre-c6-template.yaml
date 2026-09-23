@@ -18,7 +18,7 @@ esphome:
   min_version: 2026.4.0
   project:
     name: francescopace.espectre
-    version: "3.0.0-fork"
+    version: "1.0.0"
 
 esp32:
   board: esp32-c6-devkitc-1
@@ -56,8 +56,6 @@ espectre:
     name: "Breathing Rate"
   breathing_sensor:
     name: "Breathing Score"
-  phase_turbulence_sensor:
-    name: "Phase Turbulence"
   dser_sensor:
     name: "DSER"
   plcr_sensor:
@@ -73,7 +71,7 @@ wifi:
   password: !secret wifi_password
   ap:
     ssid: "ESPectre Node C6 Fallback"
-    password: "esp32csi"
+    password: !secret fallback_ap_password
 
 captive_portal:
 
@@ -87,7 +85,7 @@ api:
 
 ota:
   - platform: esphome
-    password: !secret ota_password
+    encryption: {}   # reuses the api encryption key
 
 # MQTT — direct publish for fusion service
 mqtt:
@@ -95,7 +93,7 @@ mqtt:
   port: 1883
   username: !secret mqtt_username
   password: !secret mqtt_password
-  discovery: true
+  discovery: false   # HA gets entities via api:; set true only for MQTT-only Home Assistant
   topic_prefix: esphome/csi_node_c6    # <-- change together with name
   on_connect:
     - mqtt.publish_json:
@@ -222,17 +220,6 @@ sensor:
     lambda: |-
       auto d = id(espectre_csi).get_detector();
       if (d) return d->get_last_ratio_turbulence();
-      return NAN;
-
-  - platform: template
-    name: "CSI Breathing Score"
-    id: csi_breathing_score
-    unit_of_measurement: ""
-    accuracy_decimals: 3
-    update_interval: 1s
-    lambda: |-
-      auto d = id(espectre_csi).get_detector();
-      if (d && d->is_ready()) return d->get_breathing_score();
       return NAN;
 
   - platform: template
