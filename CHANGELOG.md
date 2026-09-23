@@ -13,6 +13,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Build with ESPHome ≥ 2026.8 — C5/C6 templates used `IPAddress::str()`, which was removed; now use `str_to()`
 - `LICENSE` now contains the full GPLv3 text; copyright notices moved to `NOTICE`
 
 ---

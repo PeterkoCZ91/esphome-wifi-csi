@@ -100,7 +100,8 @@ mqtt:
         topic: "esphome/discover/csi_node_c5"
         payload: |-
           auto ips = esphome::network::get_ip_addresses();
-          root["ip"] = ips.empty() ? "unknown" : ips[0].str();
+          char ip_buf[esphome::network::IP_ADDRESS_BUFFER_SIZE];
+          root["ip"] = ips.empty() ? std::string("unknown") : std::string(ips[0].str_to(ip_buf));
           root["friendly_name"] = "WiFi CSI - Node C5";
         retain: true
   on_message:
