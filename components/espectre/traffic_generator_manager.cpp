@@ -20,6 +20,7 @@
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
 #include "lwip/ip_addr.h"
+#include <cinttypes>
 #include <cstring>
 
 namespace esphome {
@@ -93,7 +94,7 @@ void TrafficGeneratorManager::init(uint32_t rate_pps, TrafficGeneratorMode mode)
   } else if (mode == TrafficGeneratorMode::UDP) {
     mode_str = "udp";
   }
-  ESP_LOGD(TAG, "Traffic Generator Manager initialized (rate: %u pps, mode: %s)", rate_pps, mode_str);
+  ESP_LOGD(TAG, "Traffic Generator Manager initialized (rate: %" PRIu32 " pps, mode: %s)", rate_pps, mode_str);
 }
 
 bool TrafficGeneratorManager::start() {
@@ -212,7 +213,7 @@ bool TrafficGeneratorManager::start_dns_() {
   vTaskDelay(pdMS_TO_TICKS(100));
   
   uint32_t interval_ms = 1000 / rate_pps_;
-  ESP_LOGI(TAG, "Traffic generator started (mode: dns, %u pps, interval: %u ms)", 
+  ESP_LOGI(TAG, "Traffic generator started (mode: dns, %" PRIu32 " pps, interval: %" PRIu32 " ms)", 
            rate_pps_, interval_ms);
   
   return true;
@@ -265,7 +266,7 @@ void TrafficGeneratorManager::dns_traffic_task_(void* arg) {
   const uint32_t remainder_us = 1000000 % mgr->rate_pps_; // Remainder to distribute
   uint32_t accumulator = 0;  // Accumulates fractional microseconds
   
-  ESP_LOGI(TAG, "Traffic task started (gateway: " IPSTR ", interval: %u µs, remainder: %u)", 
+  ESP_LOGI(TAG, "Traffic task started (gateway: " IPSTR ", interval: %" PRIu32 " µs, remainder: %" PRIu32 ")", 
            IP2STR(&gw), interval_us, remainder_us);
   
   int64_t next_send_time = esp_timer_get_time();
@@ -378,7 +379,7 @@ bool TrafficGeneratorManager::start_udp_() {
   }
 
   vTaskDelay(pdMS_TO_TICKS(100));
-  ESP_LOGI(TAG, "Traffic generator started (mode: udp, %u pps → %s:%u)",
+  ESP_LOGI(TAG, "Traffic generator started (mode: udp, %" PRIu32 " pps → %s:%u)",
            rate_pps_, udp_host_.c_str(), udp_port_);
   return true;
 }
@@ -424,7 +425,7 @@ void TrafficGeneratorManager::udp_traffic_task_(void* arg) {
   const uint32_t remainder_us = 1000000 % mgr->rate_pps_;
   uint32_t accumulator = 0;
 
-  ESP_LOGI(TAG, "UDP task started (%s:%u, interval: %u µs)",
+  ESP_LOGI(TAG, "UDP task started (%s:%u, interval: %" PRIu32 " µs)",
            mgr->udp_host_.c_str(), mgr->udp_port_, interval_us);
 
   int64_t next_send_time = esp_timer_get_time();
@@ -551,7 +552,7 @@ bool TrafficGeneratorManager::start_ping_() {
   running_.store(true);
   
   uint32_t interval_ms = 1000 / rate_pps_;
-  ESP_LOGI(TAG, "Traffic generator started (mode: ping, %u pps, interval: %u ms)", 
+  ESP_LOGI(TAG, "Traffic generator started (mode: ping, %" PRIu32 " pps, interval: %" PRIu32 " ms)", 
            rate_pps_, interval_ms);
   
   return true;
@@ -643,7 +644,7 @@ bool TrafficGeneratorManager::start_espnow_() {
     return false;
   }
 
-  ESP_LOGI(TAG, "ESP-NOW traffic task started at %u pps", rate_pps_);
+  ESP_LOGI(TAG, "ESP-NOW traffic task started at %" PRIu32 " pps", rate_pps_);
   return true;
 }
 

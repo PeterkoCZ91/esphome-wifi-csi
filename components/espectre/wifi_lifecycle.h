@@ -21,6 +21,13 @@ namespace espectre {
 using wifi_connected_callback_t = std::function<void()>;
 using wifi_disconnected_callback_t = std::function<void()>;
 
+// WiFi band used for CSI capture (only honored on dual-band ESP32-C5)
+enum class WiFiBandMode {
+  BAND_2G,  // 2.4 GHz only (default)
+  BAND_5G,  // 5 GHz only
+  AUTO      // 2.4 + 5 GHz, driver/AP decides
+};
+
 /**
  * WiFi Lifecycle Manager
  * 
@@ -41,6 +48,13 @@ class WiFiLifecycleManager {
    * @return ESP_OK on success
    */
   esp_err_t init();
+
+  /**
+   * Set WiFi band for CSI capture (applied in init(), ESP32-C5 only)
+   */
+  void set_band_mode(WiFiBandMode mode) { band_mode_ = mode; }
+  WiFiBandMode get_band_mode() const { return band_mode_; }
+  const char *get_band_mode_str() const;
   
   /**
    * Register WiFi event handlers
@@ -68,6 +82,8 @@ class WiFiLifecycleManager {
   wifi_connected_callback_t connected_callback_;
   wifi_disconnected_callback_t disconnected_callback_;
   
+  WiFiBandMode band_mode_{WiFiBandMode::BAND_2G};
+
   // Event handler instances
   esp_event_handler_instance_t connected_instance_{nullptr};
   esp_event_handler_instance_t disconnected_instance_{nullptr};

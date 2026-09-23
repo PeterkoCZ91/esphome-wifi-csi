@@ -100,6 +100,15 @@ class ESpectreComponent : public Component {
       this->gain_lock_mode_ = GainLockMode::AUTO;  // default
     }
   }
+  void set_band_mode(const std::string &mode) {
+    if (mode == "5ghz") {
+      this->wifi_lifecycle_.set_band_mode(WiFiBandMode::BAND_5G);
+    } else if (mode == "auto") {
+      this->wifi_lifecycle_.set_band_mode(WiFiBandMode::AUTO);
+    } else {
+      this->wifi_lifecycle_.set_band_mode(WiFiBandMode::BAND_2G);  // default
+    }
+  }
   void set_detection_algorithm(const std::string &algo) {
     if (algo == "ml") {
       this->detection_algorithm_ = DetectionAlgorithm::ML;

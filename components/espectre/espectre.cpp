@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cerrno>
+#include <cinttypes>
 #include <cmath>
 #include <vector>
 #include <string>
@@ -206,10 +207,10 @@ void ESpectreComponent::on_wifi_connected_() {
           if (mean < thr * 0.25f && var < thr * thr * 0.05f) {
             if (this->auto_cal_quiet_start_ == 0) {
               this->auto_cal_quiet_start_ = now_s;
-              ESP_LOGI(TAG, "Auto-cal: quiet environment detected, waiting %us...",
+              ESP_LOGI(TAG, "Auto-cal: quiet environment detected, waiting %" PRIu32 "s...",
                        this->auto_cal_quiet_seconds_);
             } else if ((now_s - this->auto_cal_quiet_start_) >= this->auto_cal_quiet_seconds_) {
-              ESP_LOGI(TAG, "Auto-cal: quiet for %us — triggering recalibration",
+              ESP_LOGI(TAG, "Auto-cal: quiet for %" PRIu32 "s — triggering recalibration",
                        this->auto_cal_quiet_seconds_);
               this->auto_cal_done_ = true;
               this->trigger_recalibration();
@@ -301,7 +302,7 @@ void ESpectreComponent::on_wifi_connected_() {
 
   // Start traffic generator or UDP listener (external traffic mode)
   if (this->traffic_generator_rate_ > 0) {
-    ESP_LOGD(TAG, "Starting traffic generator (rate: %u pps)...", this->traffic_generator_rate_);
+    ESP_LOGD(TAG, "Starting traffic generator (rate: %" PRIu32 " pps)...", this->traffic_generator_rate_);
     if (!this->traffic_generator_.is_running()) {
       if (!this->traffic_generator_.start()) {
         ESP_LOGW(TAG, "Failed to start traffic generator");
@@ -542,9 +543,9 @@ void ESpectreComponent::send_system_info_ble_() {
     snprintf(line, sizeof(line), "hampel_threshold=%.1f", this->hampel_threshold_);
     notify_sysinfo(line);
   }
-  snprintf(line, sizeof(line), "traffic_rate=%u", this->traffic_generator_rate_);
+  snprintf(line, sizeof(line), "traffic_rate=%" PRIu32 "", this->traffic_generator_rate_);
   notify_sysinfo(line);
-  snprintf(line, sizeof(line), "publish_interval=%u", this->publish_interval_);
+  snprintf(line, sizeof(line), "publish_interval=%" PRIu32 "", this->publish_interval_);
   notify_sysinfo(line);
   snprintf(line, sizeof(line), "best_pxx=%.4f", this->best_pxx_);
   notify_sysinfo(line);
@@ -595,15 +596,15 @@ void ESpectreComponent::handle_ble_control_command_(const std::string &command) 
 }
 
 void ESpectreComponent::dump_config() {
-  ESP_LOGCONFIG(TAG, "");
+  ESP_LOGCONFIG(TAG, " ");
   ESP_LOGCONFIG(TAG, "  _____ ____  ____           __            ");
   ESP_LOGCONFIG(TAG, " | ____/ ___||  _ \\ ___  ___| |_ _ __ ___ ");
   ESP_LOGCONFIG(TAG, " |  _| \\___ \\| |_) / _ \\/ __| __| '__/ _ \\");
   ESP_LOGCONFIG(TAG, " | |___ ___) |  __/  __/ (__| |_| | |  __/");
   ESP_LOGCONFIG(TAG, " |_____|____/|_|   \\___|\\___|\\__|_|  \\___|");
-  ESP_LOGCONFIG(TAG, "");
+  ESP_LOGCONFIG(TAG, " ");
   ESP_LOGCONFIG(TAG, "      Wi-Fi CSI Motion Detection System");
-  ESP_LOGCONFIG(TAG, "");
+  ESP_LOGCONFIG(TAG, " ");
   const char* thr_mode_str = (this->threshold_mode_ == ThresholdMode::MANUAL) ? "Manual" :
                              (this->threshold_mode_ == ThresholdMode::MIN) ? "Min (P100)" : "Auto (P95x1.1)";
   ESP_LOGCONFIG(TAG, " MOTION DETECTION");
@@ -611,7 +612,7 @@ void ESpectreComponent::dump_config() {
   ESP_LOGCONFIG(TAG, " ├─ Threshold .......... %.2f (%s)", this->segmentation_threshold_, thr_mode_str);
   ESP_LOGCONFIG(TAG, " ├─ Window ............. %d pkts", this->segmentation_window_size_);
   ESP_LOGCONFIG(TAG, " └─ Baseline Pxx ....... %.4f", this->best_pxx_);
-  ESP_LOGCONFIG(TAG, "");
+  ESP_LOGCONFIG(TAG, " ");
   ESP_LOGCONFIG(TAG, " SUBCARRIERS [%02d,%02d,%02d,%02d,%02d,%02d,%02d,%02d,%02d,%02d,%02d,%02d]",
                 this->selected_subcarriers_[0], this->selected_subcarriers_[1],
                 this->selected_subcarriers_[2], this->selected_subcarriers_[3],
@@ -621,7 +622,7 @@ void ESpectreComponent::dump_config() {
                 this->selected_subcarriers_[10], this->selected_subcarriers_[11]);
   ESP_LOGCONFIG(TAG, " └─ Source ............. %s",
                 this->user_specified_subcarriers_ ? "YAML" : "NBVI");
-  ESP_LOGCONFIG(TAG, "");
+  ESP_LOGCONFIG(TAG, " ");
   ESP_LOGCONFIG(TAG, " TRAFFIC GENERATOR");
   if (this->traffic_generator_rate_ > 0) {
     const char* mode_str =
@@ -629,29 +630,29 @@ void ESpectreComponent::dump_config() {
         (this->traffic_generator_mode_ == TrafficGeneratorMode::ESPNOW) ? "espnow" :
         (this->traffic_generator_mode_ == TrafficGeneratorMode::UDP)    ? "udp"    : "dns";
     ESP_LOGCONFIG(TAG, " ├─ Mode ............... %s", mode_str);
-    ESP_LOGCONFIG(TAG, " ├─ Rate ............... %u pps", this->traffic_generator_rate_);
+    ESP_LOGCONFIG(TAG, " ├─ Rate ............... %" PRIu32 " pps", this->traffic_generator_rate_);
     ESP_LOGCONFIG(TAG, " └─ Status ............. %s",
                   this->traffic_generator_.is_running() ? "[RUNNING]" : "[STOPPED]");
   } else {
     ESP_LOGCONFIG(TAG, " └─ Mode ............... External Traffic");
   }
-  ESP_LOGCONFIG(TAG, "");
+  ESP_LOGCONFIG(TAG, " ");
   ESP_LOGCONFIG(TAG, " PUBLISH INTERVAL");
-  ESP_LOGCONFIG(TAG, " └─ Packets ............ %u", this->publish_interval_);
-  ESP_LOGCONFIG(TAG, "");
+  ESP_LOGCONFIG(TAG, " └─ Packets ............ %" PRIu32 "", this->publish_interval_);
+  ESP_LOGCONFIG(TAG, " ");
   ESP_LOGCONFIG(TAG, " LOW-PASS FILTER");
   ESP_LOGCONFIG(TAG, " ├─ Status ............. %s", this->lowpass_enabled_ ? "[ENABLED]" : "[DISABLED]");
   if (this->lowpass_enabled_) {
     ESP_LOGCONFIG(TAG, " └─ Cutoff ............. %.1f Hz", this->lowpass_cutoff_);
   }
-  ESP_LOGCONFIG(TAG, "");
+  ESP_LOGCONFIG(TAG, " ");
   ESP_LOGCONFIG(TAG, " HAMPEL FILTER");
   ESP_LOGCONFIG(TAG, " ├─ Status ............. %s", this->hampel_enabled_ ? "[ENABLED]" : "[DISABLED]");
   if (this->hampel_enabled_) {
     ESP_LOGCONFIG(TAG, " ├─ Window ............. %d pkts", this->hampel_window_);
     ESP_LOGCONFIG(TAG, " └─ Threshold .......... %.1f MAD", this->hampel_threshold_);
   }
-  ESP_LOGCONFIG(TAG, "");
+  ESP_LOGCONFIG(TAG, " ");
   ESP_LOGCONFIG(TAG, " GAIN LOCK");
   const char* gain_mode_str = "auto";
   if (this->gain_lock_mode_ == GainLockMode::ENABLED) {
@@ -660,13 +661,20 @@ void ESpectreComponent::dump_config() {
     gain_mode_str = "disabled";
   }
   ESP_LOGCONFIG(TAG, " └─ Mode ............... %s", gain_mode_str);
-  ESP_LOGCONFIG(TAG, "");
+  ESP_LOGCONFIG(TAG, " ");
+  ESP_LOGCONFIG(TAG, " WIFI BAND");
+#if CONFIG_IDF_TARGET_ESP32C5
+  ESP_LOGCONFIG(TAG, " └─ Mode ............... %s", this->wifi_lifecycle_.get_band_mode_str());
+#else
+  ESP_LOGCONFIG(TAG, " └─ Mode ............... 2.4 GHz only (single-band chip)");
+#endif
+  ESP_LOGCONFIG(TAG, " ");
   ESP_LOGCONFIG(TAG, " SENSORS");
   ESP_LOGCONFIG(TAG, " ├─ Movement ........... %s",
                 this->sensor_publisher_.has_movement_sensor() ? "[OK]" : "[--]");
   ESP_LOGCONFIG(TAG, " └─ Motion Binary ...... %s",
                 this->sensor_publisher_.has_motion_binary_sensor() ? "[OK]" : "[--]");
-  ESP_LOGCONFIG(TAG, "");
+  ESP_LOGCONFIG(TAG, " ");
 }
 
 }  // namespace espectre

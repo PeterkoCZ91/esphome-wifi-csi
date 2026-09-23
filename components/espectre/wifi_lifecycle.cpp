@@ -24,7 +24,7 @@ constexpr uint16_t WIFI_PROTOCOL_CSI_2G_PREFERRED = WIFI_PROTOCOL_11N;
 constexpr uint16_t WIFI_PROTOCOL_CSI_2G_FALLBACK = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N;
 constexpr wifi_bandwidth_t WIFI_BANDWIDTH_CSI = WIFI_BW_HT20;
 
-const char *bandwidth_to_str_(wifi_bandwidth_t bw) {
+[[maybe_unused]] const char *bandwidth_to_str_(wifi_bandwidth_t bw) {
   switch (bw) {
     case WIFI_BW_HT20:
       return "HT20";
@@ -161,18 +161,37 @@ esp_err_t get_wifi_bandwidth_for_log_(wifi_bandwidth_t *bw) {
 }  // namespace
 
   
+const char *WiFiLifecycleManager::get_band_mode_str() const {
+  switch (band_mode_) {
+    case WiFiBandMode::BAND_5G:
+      return "5 GHz only";
+    case WiFiBandMode::AUTO:
+      return "auto (2.4 + 5 GHz)";
+    case WiFiBandMode::BAND_2G:
+    default:
+      return "2.4 GHz only";
+  }
+}
+
 // Configure WiFi for optimal CSI capture
 esp_err_t WiFiLifecycleManager::init() {
   esp_err_t ret;
   
 #if CONFIG_IDF_TARGET_ESP32C5
-  // ESP32-C5 is dual-band: force 2.4 GHz for stable CSI motion sensing.
-  ret = esp_wifi_set_band_mode(WIFI_BAND_MODE_2G_ONLY);
+  // ESP32-C5 is dual-band. Default is 2.4 GHz only (stable CSI path);
+  // 5 GHz / auto are opt-in via the band_mode YAML option.
+  wifi_band_mode_t idf_band_mode = WIFI_BAND_MODE_2G_ONLY;
+  if (band_mode_ == WiFiBandMode::BAND_5G) {
+    idf_band_mode = WIFI_BAND_MODE_5G_ONLY;
+  } else if (band_mode_ == WiFiBandMode::AUTO) {
+    idf_band_mode = WIFI_BAND_MODE_AUTO;
+  }
+  ret = esp_wifi_set_band_mode(idf_band_mode);
   if (ret != ESP_OK) {
-    ESP_LOGW(TAG, "Failed to force 2.4 GHz band mode: 0x%x", ret);
-    // Non-fatal: continue, but runtime may still associate on 5 GHz in AUTO mode.
+    ESP_LOGW(TAG, "Failed to set band mode %s: 0x%x", get_band_mode_str(), ret);
+    // Non-fatal: continue with the driver default band mode.
   } else {
-    ESP_LOGI(TAG, "WiFi band mode: 2.4 GHz only");
+    ESP_LOGI(TAG, "WiFi band mode: %s", get_band_mode_str());
   }
 #endif
 

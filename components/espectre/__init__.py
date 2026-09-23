@@ -13,7 +13,12 @@ from pathlib import Path
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import sensor, binary_sensor, number, switch
-from esphome.components.esp32 import add_extra_build_file, add_idf_sdkconfig_option
+from esphome.components.esp32 import (
+    VARIANT_ESP32C5,
+    add_extra_build_file,
+    add_idf_sdkconfig_option,
+    get_esp32_variant,
+)
 
 # ESPHome 2026.2.0+ excludes unused ESP-IDF components by default
 # include_builtin_idf_component re-enables them when needed
@@ -64,6 +69,9 @@ CONF_TRAFFIC_GENERATOR_UDP_PORT = "traffic_generator_udp_port"
 
 # Gain lock mode
 CONF_GAIN_LOCK = "gain_lock"
+
+# WiFi band (ESP32-C5 only; other chips are 2.4 GHz only)
+CONF_BAND_MODE = "band_mode"
 
 
 # Detection algorithm
@@ -145,7 +153,7 @@ CONFIG_SCHEMA = cv.Schema({
     # or udp (flood to host:port — generates HT/VHT frames for full CSI on C5/C6)
     cv.Optional(CONF_TRAFFIC_GENERATOR_MODE, default="dns"): cv.one_of("dns", "ping", "espnow", "udp", lower=True),
     # UDP mode target (required when mode=udp)
-    cv.Optional(CONF_TRAFFIC_GENERATOR_UDP_HOST, default=""): cv.string,
+    cv.Optional(CONF_TRAFFIC_GENERATOR_UDP_HOST): cv.ipv4address,
     cv.Optional(CONF_TRAFFIC_GENERATOR_UDP_PORT, default=5000): cv.port,
 
     # Gain lock mode: auto (default), enabled, or disabled
@@ -153,6 +161,11 @@ CONFIG_SCHEMA = cv.Schema({
     # Enabled: always force gain lock (may freeze if too close to AP)
     # Disabled: never lock gain (less stable CSI but works at any distance)
     cv.Optional(CONF_GAIN_LOCK, default="auto"): cv.one_of("auto", "enabled", "disabled", lower=True),
+
+    # WiFi band for CSI capture (ESP32-C5 only):
+    #   2.4ghz (default): force 2.4 GHz — stable, well-tested CSI path
+    #   5ghz: force 5 GHz, auto: let the AP/driver choose (experimental)
+    cv.Optional(CONF_BAND_MODE, default="2.4ghz"): cv.one_of("2.4ghz", "5ghz", "auto", lower=True),
 
 
     # Detection algorithm: mvs (default) or ml
@@ -202,7 +215,8 @@ CONFIG_SCHEMA = cv.Schema({
     cv.Optional(CONF_PEER_MAC): cv.mac_address,
     # Multi-TX mesh: list of peer MACs (use peer_macs instead of peer_mac for 2+ TX nodes)
     # Format: ["AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66"]
-    cv.Optional("peer_macs"): cv.ensure_list(cv.mac_address),
+    # Max 5: primary MAC + CSIManager::MAX_EXTRA_PEER_MACS (4)
+    cv.Optional("peer_macs"): cv.All(cv.ensure_list(cv.mac_address), cv.Length(min=1, max=5)),
 
     # Sensors - optional with defaults, always created
     cv.Optional(CONF_MOVEMENT_SENSOR, default={"name": "Movement Score"}): sensor.sensor_schema(
@@ -326,11 +340,20 @@ def _validate_ble_config(config):
 
 def _validate_udp_config(config):
     if config.get(CONF_TRAFFIC_GENERATOR_MODE) == "udp":
-        host = config.get(CONF_TRAFFIC_GENERATOR_UDP_HOST, "")
-        if not host:
+        if CONF_TRAFFIC_GENERATOR_UDP_HOST not in config:
             raise cv.Invalid(
                 "traffic_generator_udp_host is required when traffic_generator_mode is 'udp'"
             )
+    return config
+
+
+def _validate_band_mode(config):
+    band_mode = config.get(CONF_BAND_MODE, "2.4ghz")
+    if band_mode != "2.4ghz" and get_esp32_variant() != VARIANT_ESP32C5:
+        raise cv.Invalid(
+            f"band_mode '{band_mode}' requires ESP32-C5 (the only dual-band chip); "
+            "other variants support 2.4 GHz only"
+        )
     return config
 
 
@@ -340,6 +363,7 @@ FINAL_VALIDATE_SCHEMA = cv.All(
     _inject_ble_defaults,
     _validate_ble_config,
     _validate_udp_config,
+    _validate_band_mode,
 )
 
 
@@ -386,9 +410,10 @@ async def to_code(config):
     cg.add(var.set_traffic_generator_rate(config[CONF_TRAFFIC_GENERATOR_RATE]))
     cg.add(var.set_traffic_generator_mode(config[CONF_TRAFFIC_GENERATOR_MODE]))
     if config.get(CONF_TRAFFIC_GENERATOR_MODE) == "udp":
-        cg.add(var.set_traffic_generator_udp_host(config[CONF_TRAFFIC_GENERATOR_UDP_HOST]))
+        cg.add(var.set_traffic_generator_udp_host(str(config[CONF_TRAFFIC_GENERATOR_UDP_HOST])))
         cg.add(var.set_traffic_generator_udp_port(config[CONF_TRAFFIC_GENERATOR_UDP_PORT]))
     cg.add(var.set_gain_lock_mode(config[CONF_GAIN_LOCK]))
+    cg.add(var.set_band_mode(config[CONF_BAND_MODE]))
     cg.add(var.set_detection_algorithm(config[CONF_DETECTION_ALGORITHM]))
     cg.add(var.set_publish_interval(config[CONF_PUBLISH_INTERVAL]))
     cg.add(var.set_ble_channel_enabled(config[CONF_BLE_CHANNEL_ENABLED]))
