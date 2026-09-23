@@ -34,8 +34,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import re
 import sys
 import time
@@ -207,15 +205,6 @@ def discover_task_samples(dataset_root: Path, task_name: str, max_files: int = 2
             break
     if task_dir is None:
         return []
-
-    # Load label_mapping if present
-    label_map_path = task_dir / "metadata" / "label_mapping.json"
-    label_map = {}
-    if label_map_path.exists():
-        try:
-            label_map = json.loads(label_map_path.read_text())
-        except Exception:
-            pass
 
     samples = []
     for h5 in task_dir.rglob("*.h5"):

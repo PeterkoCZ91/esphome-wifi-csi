@@ -1,0 +1,4 @@
+# Pinned toolchain for CI. Dependabot bumps this via PR, so an ESPHome release
+# that breaks the build shows up as a failing PR instead of a red master.
+esphome==2026.9.0
+ruff==0.15.20

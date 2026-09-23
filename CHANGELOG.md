@@ -19,6 +19,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Phase turbulence: inter-subcarrier phase differences are now wrapped to [-π, π]; previously 2π jumps inflated the value (affects `phase_turbulence_sensor`, presence logic and ML feature 12)
 - Breathing-aware presence hold no longer re-arms immediately after its 300-interval safety timeout; it re-arms only after the signals drop or real motion occurs
 
+### Infrastructure
+
+- CI: ESPHome pinned via `requirements-ci.txt` (bumped by Dependabot), configs compiled as a parallel matrix with toolchain cache, Python lint job (`ruff --select E9,F`)
+- CI: weekly `esphome-latest.yml` canary compiles against the newest ESPHome release
+- Actions bumped to `checkout@v7`, `setup-python@v7`, `cache@v6`
+
 ---
 
 ## [1.0.0] — 2026-05-19

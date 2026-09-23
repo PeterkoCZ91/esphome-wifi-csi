@@ -1,0 +1,41 @@
+name: ESPHome latest (canary)
+
+# Weekly compile against the newest ESPHome release. Informational only:
+# the pinned version in requirements-ci.txt gates PRs; this job warns early
+# when an upcoming ESPHome release will break the component.
+
+on:
+  schedule:
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+jobs:
+  compile:
+    name: Compile ${{ matrix.config }} (latest ESPHome)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - espectre-c5-template.yaml
+          - espectre-c6-template.yaml
+          - examples/minimal_self_sensing.yaml
+          - examples/minimal_self_sensing_c3.yaml
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install latest ESPHome
+        run: |
+          pip install --upgrade esphome
+          esphome version
+
+      - name: Create secrets.yaml
+        run: .github/scripts/ci-secrets.sh
+
+      - name: Compile
+        run: esphome compile ${{ matrix.config }}

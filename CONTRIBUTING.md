@@ -75,6 +75,19 @@ python3 mesh_monitor.py --nodes csi_node_1 csi_node_2 csi_node_3 csi_node_4
 | `MQTT_USER` | *(empty)* | MQTT username |
 | `MQTT_PASS` | *(empty)* | MQTT password |
 
+## Checks (same as CI)
+
+CI pins ESPHome in `requirements-ci.txt`; use the same version locally:
+
+```bash
+pip install -r requirements-ci.txt
+ruff check --select E9,F .
+esphome compile espectre-c6-template.yaml   # CI compiles both templates and all examples
+```
+
+A weekly canary job (`esphome-latest.yml`) compiles against the newest ESPHome release,
+so upcoming breaking changes show up before Dependabot bumps the pin.
+
 ## Pull requests
 
 - Keep firmware changes (`components/espectre/`) separate from tooling changes

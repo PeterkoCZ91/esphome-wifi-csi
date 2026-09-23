@@ -120,8 +120,8 @@ def cmd_start(room, activity, note, nodes):
         print(f"  Nodes    : {', '.join(nodes)}")
     print(f"  Label    : lab:{room}:{activity}")
     print()
-    print(f"  Run in parallel: python3 csi_logger.py --session")
-    print(f"  Stop            : python3 lab_session.py stop")
+    print("  Run in parallel: python3 csi_logger.py --session")
+    print("  Stop            : python3 lab_session.py stop")
 
 
 def cmd_stop(silent=False):

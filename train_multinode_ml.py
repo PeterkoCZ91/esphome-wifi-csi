@@ -17,8 +17,6 @@ import argparse
 import os
 import sqlite3
 import sys
-import time
-from datetime import datetime
 
 import numpy as np
 
@@ -253,7 +251,7 @@ def train(X, y):
     print(classification_report(y, y_pred, target_names=["empty", "occupied"]))
 
     cm = confusion_matrix(y, y_pred)
-    print(f"  Confusion matrix (train):")
+    print("  Confusion matrix (train):")
     print(f"    TN={cm[0,0]:4d}  FP={cm[0,1]:4d}")
     print(f"    FN={cm[1,0]:4d}  TP={cm[1,1]:4d}")
 
@@ -323,8 +321,8 @@ def main():
     if min(n_occ, n_emp) < args.min_pairs:
         print(f"\n  ERROR: insufficient data. Need at least {args.min_pairs} samples per class.")
         print(f"  Current: occupied={n_occ}, empty={n_emp}")
-        print(f"  Collect labels using: python lab_session.py start --room X --activity Y")
-        print(f"  (To only analyze the dataset: add --analyze)")
+        print("  Collect labels using: python lab_session.py start --room X --activity Y")
+        print("  (To only analyze the dataset: add --analyze)")
         sys.exit(1)
 
     model, scaler, metrics = train(X, y)

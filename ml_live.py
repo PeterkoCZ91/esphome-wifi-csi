@@ -49,7 +49,6 @@ def extract_features(row):
 def infer_now(db, model, scaler):
     now = time.time()
     since = now - WINDOW_S
-    cur_bucket = int(now / BUCKET_S)
 
     sql = (
         "SELECT ts, sc0,sc1,sc2,sc3,sc4,sc5,sc6,sc7,sc8,sc9,sc10,sc11,"

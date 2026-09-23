@@ -1,4 +1,4 @@
-name: CI — ESPHome compile check
+name: CI
 
 on:
   push:
@@ -8,6 +8,8 @@ on:
       - 'espectre-c5-template.yaml'
       - 'espectre-c6-template.yaml'
       - 'examples/**'
+      - '**.py'
+      - 'requirements-ci.txt'
       - '.github/workflows/ci.yml'
   pull_request:
     paths:
@@ -15,48 +17,72 @@ on:
       - 'espectre-c5-template.yaml'
       - 'espectre-c6-template.yaml'
       - 'examples/**'
+      - '**.py'
+      - 'requirements-ci.txt'
       - '.github/workflows/ci.yml'
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  compile:
-    name: ESPHome compile
+  lint:
+    name: Python lint
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
 
-      - name: Install ESPHome
-        run: pip install esphome
+      - name: Install ruff
+        run: pip install "$(grep '^ruff==' requirements-ci.txt)"
+
+      - name: Ruff (syntax errors + pyflakes)
+        run: ruff check --select E9,F --output-format github .
+
+  compile:
+    name: Compile ${{ matrix.config }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - espectre-c5-template.yaml
+          - espectre-c6-template.yaml
+          - examples/minimal_self_sensing.yaml
+          - examples/minimal_self_sensing_c3.yaml
+          - examples/pairwise_tx_node.yaml
+          - examples/pairwise_rx_node.yaml
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+
+      - name: Install ESPHome (pinned)
+        run: pip install -r requirements-ci.txt
+
+      - name: Cache toolchains
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.espressif
+            ~/.platformio
+          key: toolchain-${{ runner.os }}-${{ hashFiles('requirements-ci.txt') }}-${{ matrix.config }}
+          restore-keys: |
+            toolchain-${{ runner.os }}-${{ hashFiles('requirements-ci.txt') }}-
 
       - name: Create secrets.yaml
-        run: |
-          cp secrets.yaml.example secrets.yaml
-          cp secrets.yaml.example examples/secrets.yaml
-          # Replace placeholder api_key with a valid base64 key for CI
-          API_KEY=$(python3 -c "import base64,os; print(base64.b64encode(os.urandom(32)).decode())")
-          sed -i "s|your_esphome_api_key_base64==|${API_KEY}|g" secrets.yaml
-          sed -i "s|your_esphome_api_key_base64==|${API_KEY}|g" examples/secrets.yaml
+        run: .github/scripts/ci-secrets.sh
 
-      - name: Compile ESP32-C5 template
-        run: esphome compile espectre-c5-template.yaml
-
-      - name: Compile ESP32-C6 template
-        run: esphome compile espectre-c6-template.yaml
-
-      - name: Compile example — minimal self-sensing
-        run: esphome compile examples/minimal_self_sensing.yaml
-
-      - name: Compile example — minimal self-sensing (ESP32-C3)
-        run: esphome compile examples/minimal_self_sensing_c3.yaml
-
-      - name: Compile example — pairwise TX
-        run: esphome compile examples/pairwise_tx_node.yaml
-
-      - name: Compile example — pairwise RX
-        run: esphome compile examples/pairwise_rx_node.yaml
+      - name: Compile
+        run: esphome compile ${{ matrix.config }}

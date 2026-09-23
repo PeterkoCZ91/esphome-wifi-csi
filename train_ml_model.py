@@ -214,7 +214,7 @@ def load_data(db_path, nodes, window_size=75, stride=37, max_windows_per_node=50
                 "AND dser IS NOT NULL ORDER BY ts"
             )
         else:
-            print(f"  Using MVS motion flag (no ground-truth labels)")
+            print("  Using MVS motion flag (no ground-truth labels)")
             query = (
                 "SELECT sc0,sc1,sc2,sc3,sc4,sc5,sc6,sc7,sc8,sc9,sc10,sc11,"
                 "movement_score, motion, phase_turbulence, dser, plcr "
@@ -533,7 +533,7 @@ def main():
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
 
-    print(f"\nTest Results:")
+    print("\nTest Results:")
     print(f"  Accuracy:  {acc:.4f}")
     print(f"  Precision: {precision:.4f}")
     print(f"  Recall:    {recall:.4f}")

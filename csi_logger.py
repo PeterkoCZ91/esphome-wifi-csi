@@ -32,7 +32,7 @@ import sqlite3
 import sys
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import paho.mqtt.client as mqtt
 
@@ -251,7 +251,7 @@ class CSILogger:
         print(f"Connecting to {BROKER}...")
         if self.record:
             print("\n  LABELING mode — keys: [e]mpty [w]alk [s]it [f]all [q]uit")
-            print(f"  Active label: (none)\n")
+            print("  Active label: (none)\n")
         elif self.autolabel:
             print("\n  AUTOLABEL mode — labels from radars (headless)\n")
         else:
@@ -260,7 +260,6 @@ class CSILogger:
         old_settings = None
         try:
             if self.record:
-                import select
                 import termios
                 import tty
                 old_settings = termios.tcgetattr(sys.stdin)
@@ -811,7 +810,7 @@ def db_info():
     if os.path.exists(shm_path):
         total_size += os.path.getsize(shm_path)
 
-    print(f"\n=== DB Info ===\n")
+    print("\n=== DB Info ===\n")
     print(f"  Path: {DB_PATH}")
     print(f"  Size: {total_size / 1024 / 1024:.1f} MB (db={db_size / 1024 / 1024:.1f} MB)")
 
