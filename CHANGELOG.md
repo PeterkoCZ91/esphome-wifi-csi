@@ -30,9 +30,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Phase turbulence: inter-subcarrier phase differences are now wrapped to [-π, π]; previously 2π jumps inflated the value (affects `phase_turbulence_sensor`, presence logic and ML feature 12)
 - Breathing-aware presence hold no longer re-arms immediately after its 300-interval safety timeout; it re-arms only after the signals drop or real motion occurs
 - All compiler warnings in the component (`-Wreorder`, `-Wformat` for `uint32_t`, zero-length log formats on classic ESP32, unused function)
+- **Thread safety:** all ESPHome API calls (sensor/switch/number publish, calibration start, threshold updates, BLE notify) now run in the main loop; the CSI/WiFi task, WiFi event handlers and the calibration task only hand state over via atomics. Runtime low-pass changes from the templates go through `request_lowpass_cutoff()`
+- Failing CSI enable or traffic generator start after WiFi connect is logged and retried every 5 s instead of aborting (`ESP_ERROR_CHECK`)
+- Traffic generator tasks (DNS/UDP/ESP-NOW) shut down cooperatively; no more `vTaskDelete` of a task that may be inside `esp_now_send()` or polling a freed task handle; ping interval clamped to ≥ 1 ms and the effective rate is logged
+- Breathing bandpass coefficients follow the measured packet rate (were fixed for 100 pkt/s); retuned when the rate changes by > 10 %
+- Breathing presence uses an idle-gated breathing baseline instead of `amplitude_sum × 0.01`: seeded after a 30 s warm-up, follows drops quickly, rises slowly and freezes while breathing is elevated, so a still person is not absorbed; re-seeded after recalibration
+- `detection_algorithm: ml` never initialised the idle baselines, so breathing/phase presence never worked in ML mode
+- CSI packet callback no longer cleared on disconnect while a WiFi-task callback may still be running
 
 ### Infrastructure
 
+- `docs/hardware_testing.md` — log-based checklist for verifying a build on real nodes
 - CI: ESPHome pinned via `requirements-ci.txt` (bumped by Dependabot), configs compiled as a parallel matrix with toolchain cache, Python lint job (`ruff --select E9,F`)
 - CI: weekly `esphome-latest.yml` canary compiles against the newest ESPHome release
 - Actions bumped to `checkout@v7`, `setup-python@v7`, `cache@v6`

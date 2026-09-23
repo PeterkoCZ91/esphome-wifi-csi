@@ -89,6 +89,9 @@ esphome compile espectre-c6-template.yaml   # CI compiles both templates and all
 A weekly canary job (`esphome-latest.yml`) compiles against the newest ESPHome release,
 so upcoming breaking changes show up before Dependabot bumps the pin.
 
+CI only compiles. For firmware changes, also run the log-based checklist in
+[docs/hardware_testing.md](docs/hardware_testing.md) on a real node and mention the result in the PR.
+
 ## Pull requests
 
 - Keep firmware changes (`components/espectre/`) separate from tooling changes
