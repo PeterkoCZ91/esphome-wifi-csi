@@ -461,4 +461,4 @@ Yes. New statistical features go into `components/espectre/ml_features.h`. New s
 
 ## License
 
-GPLv3 — original ESPectre by Francesco Pace. Fork additions by Petr.
+GPLv3 — see [LICENSE](LICENSE). Original ESPectre by Francesco Pace; fork additions by Petr (details in [NOTICE](NOTICE)).
