@@ -7,6 +7,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-09-24
+
 ### Added
 
 - **ESP32-C3 example** — `examples/minimal_self_sensing_c3.yaml` (board + `variant: ESP32C3`), compiled in CI ([#1](https://github.com/PeterkoCZ91/esphome-wifi-csi/issues/1))
@@ -83,3 +85,7 @@ First public release. Based on upstream [ESPectre v2.7](https://github.com/franc
 - CI: ESPHome compile check for both templates and all 3 examples on every push
 - Docker: `csi-logger-session`, `ml-inference` compose services
 - `secrets.yaml.example` — complete template with all required keys
+
+[Unreleased]: https://github.com/PeterkoCZ91/esphome-wifi-csi/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/PeterkoCZ91/esphome-wifi-csi/compare/v1.0.0...v1.1.0
+[1.0.0]: https://github.com/PeterkoCZ91/esphome-wifi-csi/releases/tag/v1.0.0
