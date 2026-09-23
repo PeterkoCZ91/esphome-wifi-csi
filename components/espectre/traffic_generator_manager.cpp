@@ -103,6 +103,11 @@ bool TrafficGeneratorManager::start() {
     return false;
   }
   
+  if (!task_exited_.load()) {
+    ESP_LOGE(TAG, "Previous traffic task is still running; not starting a new one");
+    return false;
+  }
+
   // Validate rate
   if (rate_pps_ == 0) {
     ESP_LOGE(TAG, "Invalid rate: 0 pps (must be > 0)");
@@ -136,7 +141,9 @@ void TrafficGeneratorManager::resume() {
 }
 
 void TrafficGeneratorManager::stop() {
-  if (!running_.load()) {
+  // A task that fails early clears running_ itself, but its socket/handle still
+  // need cleanup — so only skip when nothing is left to release.
+  if (!running_.load() && task_exited_.load() && sock_ < 0 && ping_handle_ == nullptr) {
     return;
   }
   
@@ -156,6 +163,33 @@ void TrafficGeneratorManager::stop() {
   ESP_LOGI(TAG, "Traffic generator stopped");
 }
 
+
+// ============================================================================
+// TASK LIFECYCLE HELPERS
+// ============================================================================
+
+void TrafficGeneratorManager::exit_task_(TrafficGeneratorManager* mgr) {
+  // Last action of every traffic task: after this store the task no longer touches
+  // the socket or ESP-NOW, so the stopper may release them.
+  mgr->task_exited_.store(true);
+  vTaskDelete(NULL);
+}
+
+bool TrafficGeneratorManager::wait_for_task_exit_() {
+  // Worst case the task is sleeping one send interval (or 50 ms while paused)
+  // before it re-checks running_.
+  const uint32_t interval_ms = (rate_pps_ > 0) ? (1000U / rate_pps_) : 100U;
+  const uint32_t timeout_ms = 1000U + interval_ms;
+  for (uint32_t waited = 0; !task_exited_.load() && waited < timeout_ms; waited += 10) {
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+  if (!task_exited_.load()) {
+    ESP_LOGE(TAG, "Traffic task did not exit within %" PRIu32 " ms", timeout_ms);
+    return false;
+  }
+  task_handle_ = nullptr;
+  return true;
+}
 
 // ============================================================================
 // DNS MODE IMPLEMENTATION
@@ -186,8 +220,8 @@ bool TrafficGeneratorManager::start_dns_() {
     ESP_LOGW(TAG, "Failed to set socket non-blocking (continuing anyway)");
   }
   
-  // Reset counters
   running_.store(true);
+  task_exited_.store(false);
   
   // Create FreeRTOS task
   // Stack size: 4096 bytes (increased for safety)
@@ -206,6 +240,7 @@ bool TrafficGeneratorManager::start_dns_() {
     close(sock_);
     sock_ = -1;
     running_.store(false);
+    task_exited_.store(true);
     return false;
   }
   
@@ -220,12 +255,10 @@ bool TrafficGeneratorManager::start_dns_() {
 }
 
 void TrafficGeneratorManager::stop_dns_() {
-  // Wait for task to finish (max 1 second)
-  if (task_handle_) {
-    for (int i = 0; i < 10 && eTaskGetState(task_handle_) != eDeleted; i++) {
-      vTaskDelay(pdMS_TO_TICKS(100));
-    }
-    task_handle_ = nullptr;
+  // Wait for the task to leave its send loop; never poll the handle of a task
+  // that deletes itself (the handle may already be freed).
+  if (!wait_for_task_exit_()) {
+    return;  // keep the socket open — the task may still be using it
   }
   
   // Close socket
@@ -249,7 +282,7 @@ void TrafficGeneratorManager::dns_traffic_task_(void* arg) {
     ESP_LOGE(TAG, "Failed to get gateway in task");
     // Keep manager state coherent if task exits unexpectedly.
     mgr->running_.store(false);
-    vTaskDelete(NULL);
+    exit_task_(mgr);
     return;
   }
   
@@ -328,7 +361,7 @@ void TrafficGeneratorManager::dns_traffic_task_(void* arg) {
   }
   
   ESP_LOGI(TAG, "DNS traffic task stopped");
-  vTaskDelete(NULL);
+  exit_task_(mgr);
 }
 
 // ============================================================================
@@ -360,6 +393,7 @@ bool TrafficGeneratorManager::start_udp_() {
   }
 
   running_.store(true);
+  task_exited_.store(false);
 
   BaseType_t result = xTaskCreate(
       udp_traffic_task_,
@@ -375,6 +409,7 @@ bool TrafficGeneratorManager::start_udp_() {
     close(sock_);
     sock_ = -1;
     running_.store(false);
+    task_exited_.store(true);
     return false;
   }
 
@@ -385,11 +420,8 @@ bool TrafficGeneratorManager::start_udp_() {
 }
 
 void TrafficGeneratorManager::stop_udp_() {
-  if (task_handle_) {
-    for (int i = 0; i < 10 && eTaskGetState(task_handle_) != eDeleted; i++) {
-      vTaskDelay(pdMS_TO_TICKS(100));
-    }
-    task_handle_ = nullptr;
+  if (!wait_for_task_exit_()) {
+    return;  // keep the socket open — the task may still be using it
   }
   if (sock_ >= 0) {
     close(sock_);
@@ -411,7 +443,7 @@ void TrafficGeneratorManager::udp_traffic_task_(void* arg) {
   if (inet_aton(mgr->udp_host_.c_str(), &target_ip) == 0) {
     ESP_LOGE(TAG, "UDP task: invalid host");
     mgr->running_.store(false);
-    vTaskDelete(NULL);
+    exit_task_(mgr);
     return;
   }
 
@@ -472,7 +504,7 @@ void TrafficGeneratorManager::udp_traffic_task_(void* arg) {
   }
 
   ESP_LOGI(TAG, "UDP traffic task stopped");
-  vTaskDelete(NULL);
+  exit_task_(mgr);
 }
 
 // ============================================================================
@@ -519,7 +551,10 @@ bool TrafficGeneratorManager::start_ping_() {
   
   // Configure timing
   ping_config.count = ESP_PING_COUNT_INFINITE;  // Run forever
-  ping_config.interval_ms = 1000 / rate_pps_;   // Interval based on rate
+  // Integer ms interval: clamp to >= 1 ms; truncation changes the effective rate
+  // (e.g. 300 pps -> 3 ms -> ~333 pps), which is logged below.
+  const uint32_t interval_ms = (rate_pps_ >= 1000) ? 1 : (1000 / rate_pps_);
+  ping_config.interval_ms = interval_ms;
   ping_config.timeout_ms = 1000;                // 1 second timeout
   ping_config.data_size = 0;                    // No payload (header only, smallest possible)
   ping_config.task_stack_size = 2560;           // Stack size for ping task
@@ -551,9 +586,13 @@ bool TrafficGeneratorManager::start_ping_() {
   
   running_.store(true);
   
-  uint32_t interval_ms = 1000 / rate_pps_;
+  const uint32_t effective_pps = 1000 / interval_ms;
   ESP_LOGI(TAG, "Traffic generator started (mode: ping, %" PRIu32 " pps, interval: %" PRIu32 " ms)", 
            rate_pps_, interval_ms);
+  if (effective_pps != rate_pps_) {
+    ESP_LOGW(TAG, "Ping interval is whole milliseconds: effective rate ~%" PRIu32 " pps (requested %" PRIu32 ")",
+             effective_pps, rate_pps_);
+  }
   
   return true;
 }
@@ -625,6 +664,7 @@ bool TrafficGeneratorManager::start_espnow_() {
   }
 
   running_.store(true);
+  task_exited_.store(false);
 
   BaseType_t result = xTaskCreatePinnedToCore(
       espnow_traffic_task_,
@@ -639,6 +679,7 @@ bool TrafficGeneratorManager::start_espnow_() {
   if (result != pdPASS) {
     ESP_LOGE(TAG, "Failed to create ESP-NOW task (result: %d)", result);
     running_.store(false);
+    task_exited_.store(true);
     esp_now_deinit();
     espnow_initialized_ = false;
     return false;
@@ -649,9 +690,10 @@ bool TrafficGeneratorManager::start_espnow_() {
 }
 
 void TrafficGeneratorManager::stop_espnow_() {
-  if (task_handle_ != nullptr) {
-    vTaskDelete(task_handle_);
-    task_handle_ = nullptr;
+  // Cooperative shutdown: deleting the task from here could interrupt it inside
+  // esp_now_send() while it holds ESP-NOW/WiFi locks.
+  if (!wait_for_task_exit_()) {
+    return;  // leave ESP-NOW initialized — the task may still be sending
   }
 
   if (espnow_initialized_) {
@@ -679,7 +721,8 @@ void TrafficGeneratorManager::espnow_traffic_task_(void* arg) {
     vTaskDelay(pdMS_TO_TICKS(delay_ms > 0 ? delay_ms : 1));
   }
 
-  vTaskDelete(NULL);
+  ESP_LOGD(TAG, "ESP-NOW traffic task stopped");
+  exit_task_(mgr);
 }
 
 }  // namespace espectre

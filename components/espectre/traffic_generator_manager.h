@@ -164,6 +164,9 @@ class TrafficGeneratorManager {
   TrafficGeneratorMode mode_{TrafficGeneratorMode::DNS};
   std::atomic<bool> running_{false};  // atomic: accessed from main task and FreeRTOS task
   std::atomic<bool> paused_{false};   // atomic: accessed from main task and FreeRTOS task
+  // Set by the traffic task right before vTaskDelete(NULL). The stopper waits for it
+  // instead of deleting the task externally or polling a possibly freed task handle.
+  std::atomic<bool> task_exited_{true};
 
   // UDP mode config
   std::string udp_host_;
@@ -183,6 +186,11 @@ class TrafficGeneratorManager {
   void stop_ping_();
   void stop_espnow_();
   void stop_udp_();
+
+  // Wait (bounded) until the traffic task has signalled exit; false on timeout
+  bool wait_for_task_exit_();
+  // Called by the traffic task as its last action before vTaskDelete(NULL)
+  static void exit_task_(TrafficGeneratorManager* mgr);
 };
 
 }  // namespace espectre
