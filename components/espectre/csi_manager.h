@@ -17,7 +17,9 @@
 #include "base_detector.h"
 #include "wifi_csi_interface.h"
 #include "gain_controller.h"
+#include <atomic>
 #include <functional>
+#include "freertos/FreeRTOS.h"
 
 namespace esphome {
 namespace espectre {
@@ -57,6 +59,9 @@ class CSIManager {
   
   /**
    * Update subcarrier selection
+   * 
+   * Thread-safe: the band is copied and applied by the CSI (WiFi) task
+   * before the next packet is processed.
    * 
    * @param subcarriers New subcarrier selection (array of 12 subcarriers)
    */
@@ -161,9 +166,18 @@ class CSIManager {
   bool get_last_channel_estimate_valid() const { return last_channel_estimate_valid_; }
   
   /**
-   * Clear detector buffer (for calibration reset)
+   * Clear detector buffer (for calibration reset).
+   * Must run in the CSI (WiFi) task — other tasks use request_detector_clear().
    */
   void clear_detector_buffer();
+
+  /**
+   * Thread-safe requests from other tasks (main loop). They are applied by the
+   * CSI task at the start of the next packet, so the detector is only ever
+   * mutated by the task that feeds it.
+   */
+  void request_detector_clear();
+  void request_lowpass(bool enabled, float cutoff_hz);
 
   /**
    * Peer MAC filter for pairwise/mesh sensing.
@@ -251,6 +265,20 @@ class CSIManager {
   uint32_t ht20_packets_{0};
   
   esp_err_t configure_platform_specific_();
+
+  // Cross-task requests (see request_*). pending_flags_ is checked lock-free per
+  // packet; the payload is copied under pending_mux_.
+  void apply_pending_requests_();
+  static constexpr uint8_t PENDING_BAND = 1 << 0;
+  static constexpr uint8_t PENDING_CLEAR = 1 << 1;
+  static constexpr uint8_t PENDING_LOWPASS = 1 << 2;
+  std::atomic<uint8_t> pending_flags_{0};
+  portMUX_TYPE pending_mux_ = portMUX_INITIALIZER_UNLOCKED;
+  uint8_t pending_band_[HT20_SELECTED_BAND_SIZE]{};
+  bool pending_lowpass_enabled_{false};
+  float pending_lowpass_cutoff_{0.0f};
+  // CSI-task-owned copy of the active band (selected_subcarriers_ points here)
+  uint8_t band_storage_[HT20_SELECTED_BAND_SIZE]{};
 };
 
 }  // namespace espectre

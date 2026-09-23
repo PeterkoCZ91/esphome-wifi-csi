@@ -36,6 +36,9 @@
 #include "traffic_generator_manager.h"
 #include "udp_listener.h"
 
+#include <atomic>
+#include "freertos/FreeRTOS.h"
+
 namespace esphome {
 namespace esp32_ble_server {
 class BLEServer;
@@ -198,6 +201,10 @@ class ESpectreComponent : public Component {
   // Runtime calibration trigger (called from HA via switch component)
   void trigger_recalibration();
 
+  // Runtime low-pass cutoff change (e.g. from an MQTT lambda). Thread-safe:
+  // applied by the CSI task before the next packet.
+  void request_lowpass_cutoff(float cutoff_hz) { this->csi_manager_.request_lowpass(true, cutoff_hz); }
+
   // Check if calibration is in progress
   bool is_calibrating() const {
     return this->nbvi_calibrator_.is_calibrating();
@@ -215,8 +222,13 @@ class ESpectreComponent : public Component {
   // Start band/baseline calibration (shared by boot and runtime trigger)
   void start_calibration_();
   // WiFi lifecycle callbacks
-  void on_wifi_connected_();
+  // Run in loop(): event/CSI/calibration tasks only hand over state (see below)
+  bool on_wifi_connected_();  // false = retry later (CSI enable or traffic start failed)
   void on_wifi_disconnected_();
+  void process_wifi_events_();
+  void process_csi_publish_(MotionState state, uint32_t packets_received);
+  void process_calibration_result_();
+  void process_ble_telemetry_();
 
   // Send system info over BLE (for game display)
   void send_system_info_ble_();
@@ -291,6 +303,36 @@ class ESpectreComponent : public Component {
   bool ble_client_connected_{false};  // At least one BLE client connected
   uint32_t ble_telemetry_interval_ms_{40};  // BLE notify interval (throttling)
   uint32_t last_ble_telemetry_ms_{0};  // Last telemetry notify timestamp
+
+  // ---- Cross-task handover (all ESPHome API calls happen in loop()) ----
+  // WiFi/IP events (sys_evt task)
+  std::atomic<bool> wifi_link_up_{false};
+  std::atomic<uint32_t> wifi_connect_seq_{0};
+  std::atomic<uint32_t> wifi_disconnect_seq_{0};
+  uint32_t seen_connect_seq_{0};
+  uint32_t seen_disconnect_seq_{0};
+  bool wifi_session_active_{false};         // on_wifi_connected_() completed for current link
+  uint32_t wifi_connect_retry_ms_{0};       // next retry time after a failed connect handling
+  static constexpr uint32_t WIFI_CONNECT_RETRY_MS = 5000;
+  // Periodic publish (CSI / WiFi task)
+  std::atomic<bool> publish_pending_{false};
+  std::atomic<uint8_t> pending_state_{0};
+  std::atomic<uint32_t> pending_packets_{0};
+  // Gain lock complete (CSI / WiFi task)
+  std::atomic<bool> gain_lock_pending_{false};
+  // Calibration result (nbvi_cal task); payload written before the flag is set
+  std::atomic<bool> cal_result_pending_{false};
+  uint8_t cal_result_band_[12]{};
+  uint8_t cal_result_band_size_{0};
+  bool cal_result_band_valid_{false};
+  std::vector<float> cal_result_values_;
+  bool cal_result_success_{false};
+  // BLE telemetry (CSI task writes, loop notifies)
+  portMUX_TYPE ble_telemetry_mux_ = portMUX_INITIALIZER_UNLOCKED;
+  float ble_telemetry_movement_{0.0f};
+  float ble_telemetry_threshold_{0.0f};
+  std::atomic<bool> ble_telemetry_pending_{false};
+  std::atomic<bool> ble_telemetry_active_{false};  // mirror of ble_client_connected_ for the CSI task
 
   // Auto-calibration quiet monitor
   bool auto_cal_enabled_{true};

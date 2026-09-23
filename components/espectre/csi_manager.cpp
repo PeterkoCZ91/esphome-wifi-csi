@@ -49,7 +49,12 @@ void CSIManager::init(BaseDetector* detector,
                      GainLockMode gain_lock_mode,
                      IWiFiCSI* wifi_csi) {
   detector_ = detector;
-  selected_subcarriers_ = selected_subcarriers;
+  if (selected_subcarriers != nullptr) {
+    std::memcpy(band_storage_, selected_subcarriers, sizeof(band_storage_));
+    selected_subcarriers_ = band_storage_;
+  } else {
+    selected_subcarriers_ = nullptr;
+  }
   publish_rate_ = publish_rate;
   
   // Use injected WiFi CSI interface or default real implementation
@@ -63,8 +68,54 @@ void CSIManager::init(BaseDetector* detector,
 }
 
 void CSIManager::update_subcarrier_selection(const uint8_t subcarriers[12]) {
-  selected_subcarriers_ = subcarriers;
-  ESP_LOGD(TAG, "Subcarrier selection updated (%d subcarriers)", active_num_subcarriers_);
+  if (subcarriers == nullptr) {
+    return;
+  }
+  portENTER_CRITICAL(&pending_mux_);
+  std::memcpy(pending_band_, subcarriers, sizeof(pending_band_));
+  portEXIT_CRITICAL(&pending_mux_);
+  pending_flags_.fetch_or(PENDING_BAND, std::memory_order_release);
+  ESP_LOGD(TAG, "Subcarrier selection update queued");
+}
+
+void CSIManager::request_detector_clear() {
+  pending_flags_.fetch_or(PENDING_CLEAR, std::memory_order_release);
+}
+
+void CSIManager::request_lowpass(bool enabled, float cutoff_hz) {
+  portENTER_CRITICAL(&pending_mux_);
+  pending_lowpass_enabled_ = enabled;
+  pending_lowpass_cutoff_ = cutoff_hz;
+  portEXIT_CRITICAL(&pending_mux_);
+  pending_flags_.fetch_or(PENDING_LOWPASS, std::memory_order_release);
+}
+
+void CSIManager::apply_pending_requests_() {
+  const uint8_t flags = pending_flags_.exchange(0, std::memory_order_acquire);
+  if (flags == 0) {
+    return;
+  }
+
+  bool lowpass_enabled = false;
+  float lowpass_cutoff = 0.0f;
+  portENTER_CRITICAL(&pending_mux_);
+  if (flags & PENDING_BAND) {
+    std::memcpy(band_storage_, pending_band_, sizeof(band_storage_));
+  }
+  lowpass_enabled = pending_lowpass_enabled_;
+  lowpass_cutoff = pending_lowpass_cutoff_;
+  portEXIT_CRITICAL(&pending_mux_);
+
+  if (flags & PENDING_BAND) {
+    selected_subcarriers_ = band_storage_;
+    ESP_LOGD(TAG, "Subcarrier selection applied (%d subcarriers)", HT20_SELECTED_BAND_SIZE);
+  }
+  if ((flags & PENDING_LOWPASS) && detector_) {
+    detector_->configure_lowpass(lowpass_enabled, lowpass_cutoff);
+  }
+  if (flags & PENDING_CLEAR) {
+    clear_detector_buffer();
+  }
 }
 
 void CSIManager::set_threshold(float threshold) {
@@ -86,6 +137,9 @@ void CSIManager::process_packet(wifi_csi_info_t* data) {
   if (!data || !detector_) {
     return;
   }
+
+  // Apply band / buffer-clear / low-pass requests queued by other tasks
+  apply_pending_requests_();
   
   int8_t *csi_data = data->buf;
   size_t csi_len = data->len;

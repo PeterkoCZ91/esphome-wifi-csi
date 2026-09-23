@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cerrno>
+#include <algorithm>
 #include <cinttypes>
 #include <cmath>
 #include <vector>
@@ -127,29 +128,30 @@ void ESpectreComponent::setup() {
       this->csi_manager_.add_extra_peer_mac(mac.data());
     }
   }
+  // Per-packet callback (CSI / WiFi task). Keep it registered: the detector is
+  // evaluated every packet by design. BLE notify happens in loop().
   this->csi_manager_.set_game_mode_callback([this](float movement, float threshold) {
-    if (!this->ble_channel_enabled_ || !this->ble_client_connected_ || this->ble_telemetry_char_ == nullptr) {
+    if (!this->ble_telemetry_active_.load(std::memory_order_relaxed)) {
       return;
     }
-    const uint32_t now = millis();
-    if (now - this->last_ble_telemetry_ms_ < this->ble_telemetry_interval_ms_) {
-      return;
-    }
-    this->last_ble_telemetry_ms_ = now;
-
-    std::vector<uint8_t> payload(sizeof(float) * 2);
-    memcpy(payload.data(), &movement, sizeof(float));
-    memcpy(payload.data() + sizeof(float), &threshold, sizeof(float));
-#ifdef USE_ESP32_BLE_SERVER
-    this->ble_telemetry_char_->set_value(std::move(payload));
-    this->ble_telemetry_char_->notify();
-#endif
+    portENTER_CRITICAL(&this->ble_telemetry_mux_);
+    this->ble_telemetry_movement_ = movement;
+    this->ble_telemetry_threshold_ = threshold;
+    portEXIT_CRITICAL(&this->ble_telemetry_mux_);
+    this->ble_telemetry_pending_.store(true, std::memory_order_release);
   });
 
   // 4. Register WiFi lifecycle handlers
   esp_err_t handlers_err = this->wifi_lifecycle_.register_handlers(
-      [this]() { this->on_wifi_connected_(); },
-      [this]() { this->on_wifi_disconnected_(); }
+      // sys_evt task: record the event, loop() does the work
+      [this]() {
+        this->wifi_link_up_.store(true, std::memory_order_release);
+        this->wifi_connect_seq_.fetch_add(1, std::memory_order_release);
+      },
+      [this]() {
+        this->wifi_link_up_.store(false, std::memory_order_release);
+        this->wifi_disconnect_seq_.fetch_add(1, std::memory_order_release);
+      }
   );
   if (handlers_err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to register WiFi handlers: %s. ESPectre setup aborted.",
@@ -168,7 +170,9 @@ ESpectreComponent::~ESpectreComponent() {
   // Detector cleanup is handled by destructor of member objects
 }
 
-void ESpectreComponent::on_wifi_connected_() {
+bool ESpectreComponent::on_wifi_connected_() {
+  // Runs in loop() (deferred from the IP_EVENT_STA_GOT_IP handler).
+  ESP_LOGI(TAG, "WiFi connected - starting CSI (main loop)");
 
   // Pre-initialize ESP-NOW before CSI enable (ESP32-C5: calling esp_now_init() AFTER
   // esp_wifi_set_csi() disables the CSI callback — must be done in correct order)
@@ -176,128 +180,19 @@ void ESpectreComponent::on_wifi_connected_() {
     this->traffic_generator_.pre_init();
   }
 
-  // Enable CSI using CSI Manager with periodic callback
+  // Enable CSI. The callback runs in the WiFi task: it only hands the state over
+  // to loop(), which does all publishing (ESPHome APIs are not thread-safe).
   if (!this->csi_manager_.is_enabled()) {
-    ESP_ERROR_CHECK(this->csi_manager_.enable(
-      [this](MotionState state, uint32_t packets_received) {
-
-        // Don't publish until ready
-        if (!this->ready_to_publish_) return;
-
-        // Re-publish threshold on first sensor update (HA is now connected)
-        if (!this->threshold_republished_ && this->threshold_number_ != nullptr) {
-          auto *threshold_num = static_cast<ESpectreThresholdNumber *>(this->threshold_number_);
-          threshold_num->republish_state();
-          this->threshold_republished_ = true;
-        }
-
-        // Log status with progress bar and actual CSI rate
-        this->sensor_publisher_.log_status(TAG, this->detector_, state, packets_received);
-
-        // Auto-calibration: trigger once when environment is quiet for N minutes
-        // Condition: mean_turbulence < 25% of threshold AND running_variance < 5% of threshold²
-        // Resets if any motion detected — guarantees a clean quiet baseline
-        if (this->auto_cal_enabled_ && !this->auto_cal_done_ && !this->is_calibrating()
-            && this->detector_->is_ready()) {
-          float mean = this->detector_->get_mean_turbulence();
-          float var  = this->detector_->get_running_variance();
-          float thr  = this->segmentation_threshold_;
-          uint32_t now_s = static_cast<uint32_t>(esp_timer_get_time() / 1000000ULL);
-
-          if (mean < thr * 0.25f && var < thr * thr * 0.05f) {
-            if (this->auto_cal_quiet_start_ == 0) {
-              this->auto_cal_quiet_start_ = now_s;
-              ESP_LOGI(TAG, "Auto-cal: quiet environment detected, waiting %" PRIu32 "s...",
-                       this->auto_cal_quiet_seconds_);
-            } else if ((now_s - this->auto_cal_quiet_start_) >= this->auto_cal_quiet_seconds_) {
-              ESP_LOGI(TAG, "Auto-cal: quiet for %" PRIu32 "s — triggering recalibration",
-                       this->auto_cal_quiet_seconds_);
-              this->auto_cal_done_ = true;
-              this->trigger_recalibration();
-            }
-          } else {
-            if (this->auto_cal_quiet_start_ != 0) {
-              ESP_LOGD(TAG, "Auto-cal: motion detected, resetting quiet timer");
-              this->auto_cal_quiet_start_ = 0;
-            }
-          }
-        }
-
-        // Stuck-in-motion detection: if motion persists for ~24h, raise threshold
-        if (state == MotionState::MOTION) {
-          this->stuck_motion_count_++;
-          if (this->stuck_motion_count_ >= STUCK_MOTION_LIMIT
-              && this->stuck_raise_count_ < STUCK_RAISE_MAX) {
-            float new_thr = this->segmentation_threshold_ * STUCK_RAISE_FACTOR;
-            if (new_thr <= MVS_MAX_THRESHOLD) {
-              ESP_LOGW(TAG, "Stuck-in-motion detected (%lu intervals). "
-                       "Raising threshold %.4f -> %.4f (raise %d/%d)",
-                       (unsigned long)this->stuck_motion_count_,
-                       this->segmentation_threshold_, new_thr,
-                       this->stuck_raise_count_ + 1, STUCK_RAISE_MAX);
-              this->set_threshold_runtime(new_thr);
-              this->csi_manager_.clear_detector_buffer();
-              this->stuck_raise_count_++;
-              this->stuck_motion_count_ = 0;
-            }
-          }
-        } else {
-          this->stuck_motion_count_ = 0;
-        }
-
-        // Breathing-aware presence hold:
-        // If detector says IDLE but breathing + phase signals indicate a person,
-        // override to MOTION (stationary presence). Auto-releases after PRESENCE_HOLD_MAX.
-        MotionState effective_state = state;
-        if (state == MotionState::IDLE && this->detector_->is_ready()
-            && this->detector_->are_idle_baselines_initialized()) {
-          float breath = this->detector_->get_breathing_score();
-          float phase  = this->detector_->get_last_phase_turbulence();
-          float idle_phase = this->detector_->get_idle_mean_phase_turbulence();
-          // Use idle_amplitude_baseline as proxy for breathing baseline (quiet breathing ~ 0)
-          float idle_breath = this->detector_->get_idle_amplitude_baseline() * 0.01f;
-          if (idle_breath < 0.001f) idle_breath = 0.001f;  // floor
-
-          bool breathing_elevated = breath > idle_breath * BREATHING_HOLD_FACTOR;
-          bool phase_elevated = idle_phase > 0.001f && phase > idle_phase * PHASE_HOLD_FACTOR;
-
-          if (breathing_elevated && phase_elevated && this->presence_hold_expired_) {
-            // Hold already timed out: stay released until signals drop or real motion occurs
-          } else if (breathing_elevated && phase_elevated) {
-            if (!this->presence_hold_active_) {
-              ESP_LOGI(TAG, "Presence hold: breathing=%.4f (>%.4f) phase=%.4f (>%.4f)",
-                       breath, idle_breath * BREATHING_HOLD_FACTOR,
-                       phase, idle_phase * PHASE_HOLD_FACTOR);
-              this->presence_hold_active_ = true;
-            }
-            this->presence_hold_count_++;
-            if (this->presence_hold_count_ < PRESENCE_HOLD_MAX) {
-              effective_state = MotionState::MOTION;
-            } else {
-              ESP_LOGW(TAG, "Presence hold auto-released after %d intervals", PRESENCE_HOLD_MAX);
-              this->presence_hold_active_ = false;
-              this->presence_hold_count_ = 0;
-              this->presence_hold_expired_ = true;
-            }
-          } else {
-            if (this->presence_hold_active_) {
-              ESP_LOGI(TAG, "Presence hold released (signals below threshold)");
-            }
-            this->presence_hold_active_ = false;
-            this->presence_hold_count_ = 0;
-            this->presence_hold_expired_ = false;
-          }
-        } else if (state == MotionState::MOTION) {
-          // Real motion — reset hold state
-          this->presence_hold_active_ = false;
-          this->presence_hold_count_ = 0;
-          this->presence_hold_expired_ = false;
-        }
-
-        // Publish all sensors
-        this->sensor_publisher_.publish_all(this->detector_, effective_state);
-      }
-    ));
+    esp_err_t err = this->csi_manager_.enable([this](MotionState state, uint32_t packets_received) {
+      this->pending_state_.store(static_cast<uint8_t>(state), std::memory_order_relaxed);
+      this->pending_packets_.store(packets_received, std::memory_order_relaxed);
+      this->publish_pending_.store(true, std::memory_order_release);
+    });
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "CSI enable failed: %s - retrying in %" PRIu32 " s",
+               esp_err_to_name(err), WIFI_CONNECT_RETRY_MS / 1000);
+      return false;
+    }
   }
 
   // Start traffic generator or UDP listener (external traffic mode)
@@ -305,8 +200,9 @@ void ESpectreComponent::on_wifi_connected_() {
     ESP_LOGD(TAG, "Starting traffic generator (rate: %" PRIu32 " pps)...", this->traffic_generator_rate_);
     if (!this->traffic_generator_.is_running()) {
       if (!this->traffic_generator_.start()) {
-        ESP_LOGW(TAG, "Failed to start traffic generator");
-        return;
+        ESP_LOGW(TAG, "Failed to start traffic generator - retrying in %" PRIu32 " s",
+                 WIFI_CONNECT_RETRY_MS / 1000);
+        return false;
       }
       ESP_LOGI(TAG, "Traffic generator started successfully");
     } else {
@@ -325,6 +221,10 @@ void ESpectreComponent::on_wifi_connected_() {
   // Two-phase calibration:
   // 1. Gain Lock (~3 seconds, 300 packets) - locks AGC/FFT for stable CSI
   // 2. Baseline Calibration (~7.5 seconds, 750 packets) - calculates normalization scale
+  // Registered here (main loop). Invoked from the CSI (WiFi) task after 300
+  // packets, or synchronously on chips without gain lock support. It only does
+  // detector-local setup; the calibration start (switch publish, SPIFFS) is
+  // deferred to loop().
   this->csi_manager_.set_gain_lock_callback([this]() {
     auto& gc = this->csi_manager_.get_gain_controller();
     auto mode = gc.get_mode();
@@ -342,15 +242,19 @@ void ESpectreComponent::on_wifi_connected_() {
     this->detector_->set_cv_normalization(need_cv);
     this->nbvi_calibrator_.set_cv_normalization(need_cv);
 
-    this->start_calibration_();
+    this->gain_lock_pending_.store(true, std::memory_order_release);
   });
 
   // Ready to publish sensors (with internal or external traffic)
   this->ready_to_publish_ = true;
   this->threshold_republished_ = false;
+  return true;
 }
 
 void ESpectreComponent::on_wifi_disconnected_() {
+  // Runs in loop() (deferred from the WIFI_EVENT_STA_DISCONNECTED handler).
+  ESP_LOGI(TAG, "WiFi disconnected - stopping CSI (main loop)");
+
   // Disable CSI using CSI Manager
   this->csi_manager_.disable();
 
@@ -366,9 +270,261 @@ void ESpectreComponent::on_wifi_disconnected_() {
 
   // Reset flags
   this->ready_to_publish_ = false;
+  this->publish_pending_.store(false, std::memory_order_relaxed);
+}
+
+void ESpectreComponent::process_wifi_events_() {
+  const uint32_t disconnect_seq = this->wifi_disconnect_seq_.load(std::memory_order_acquire);
+  const uint32_t connect_seq = this->wifi_connect_seq_.load(std::memory_order_acquire);
+
+  // A disconnect since the last loop: tear down (idempotent), even if a
+  // reconnect already followed — the connect below then starts a fresh session.
+  if (disconnect_seq != this->seen_disconnect_seq_) {
+    this->seen_disconnect_seq_ = disconnect_seq;
+    if (this->wifi_session_active_ || this->csi_manager_.is_enabled()) {
+      this->on_wifi_disconnected_();
+    }
+    this->wifi_session_active_ = false;
+  }
+
+  // New GOT_IP event: (re)run connect handling; it is idempotent for running parts.
+  if (connect_seq != this->seen_connect_seq_) {
+    this->seen_connect_seq_ = connect_seq;
+    this->wifi_session_active_ = false;
+    this->wifi_connect_retry_ms_ = 0;
+  }
+
+  if (!this->wifi_session_active_ && this->wifi_link_up_.load(std::memory_order_acquire)) {
+    const uint32_t now = millis();
+    if (this->wifi_connect_retry_ms_ == 0 || static_cast<int32_t>(now - this->wifi_connect_retry_ms_) >= 0) {
+      if (this->on_wifi_connected_()) {
+        this->wifi_session_active_ = true;
+        this->wifi_connect_retry_ms_ = 0;
+      } else {
+        // Avoid 0, which means "try immediately"
+        this->wifi_connect_retry_ms_ = (now + WIFI_CONNECT_RETRY_MS) | 1u;
+      }
+    }
+  }
+}
+
+void ESpectreComponent::process_csi_publish_(MotionState state, uint32_t packets_received) {
+  // Don't publish until ready
+  if (!this->ready_to_publish_) return;
+
+  // Re-publish threshold on first sensor update (HA is now connected)
+  if (!this->threshold_republished_ && this->threshold_number_ != nullptr) {
+    auto *threshold_num = static_cast<ESpectreThresholdNumber *>(this->threshold_number_);
+    threshold_num->republish_state();
+    this->threshold_republished_ = true;
+  }
+
+  // Log status with progress bar and actual CSI rate
+  this->sensor_publisher_.log_status(TAG, this->detector_, state, packets_received);
+
+  // Auto-calibration: trigger once when environment is quiet for N minutes
+  // Condition: mean_turbulence < 25% of threshold AND running_variance < 5% of threshold²
+  // Resets if any motion detected — guarantees a clean quiet baseline
+  if (this->auto_cal_enabled_ && !this->auto_cal_done_ && !this->is_calibrating()
+      && this->detector_->is_ready()) {
+    float mean = this->detector_->get_mean_turbulence();
+    float var  = this->detector_->get_running_variance();
+    float thr  = this->segmentation_threshold_;
+    uint32_t now_s = static_cast<uint32_t>(esp_timer_get_time() / 1000000ULL);
+
+    if (mean < thr * 0.25f && var < thr * thr * 0.05f) {
+      if (this->auto_cal_quiet_start_ == 0) {
+        this->auto_cal_quiet_start_ = now_s;
+        ESP_LOGI(TAG, "Auto-cal: quiet environment detected, waiting %" PRIu32 "s...",
+                 this->auto_cal_quiet_seconds_);
+      } else if ((now_s - this->auto_cal_quiet_start_) >= this->auto_cal_quiet_seconds_) {
+        ESP_LOGI(TAG, "Auto-cal: quiet for %" PRIu32 "s — triggering recalibration",
+                 this->auto_cal_quiet_seconds_);
+        this->auto_cal_done_ = true;
+        this->trigger_recalibration();
+      }
+    } else {
+      if (this->auto_cal_quiet_start_ != 0) {
+        ESP_LOGD(TAG, "Auto-cal: motion detected, resetting quiet timer");
+        this->auto_cal_quiet_start_ = 0;
+      }
+    }
+  }
+
+  // Stuck-in-motion detection: if motion persists for ~24h, raise threshold
+  if (state == MotionState::MOTION) {
+    this->stuck_motion_count_++;
+    if (this->stuck_motion_count_ >= STUCK_MOTION_LIMIT
+        && this->stuck_raise_count_ < STUCK_RAISE_MAX) {
+      float new_thr = this->segmentation_threshold_ * STUCK_RAISE_FACTOR;
+      if (new_thr <= MVS_MAX_THRESHOLD) {
+        ESP_LOGW(TAG, "Stuck-in-motion detected (%lu intervals). "
+                 "Raising threshold %.4f -> %.4f (raise %d/%d)",
+                 (unsigned long)this->stuck_motion_count_,
+                 this->segmentation_threshold_, new_thr,
+                 this->stuck_raise_count_ + 1, STUCK_RAISE_MAX);
+        this->set_threshold_runtime(new_thr);
+        this->csi_manager_.request_detector_clear();
+        this->stuck_raise_count_++;
+        this->stuck_motion_count_ = 0;
+      }
+    }
+  } else {
+    this->stuck_motion_count_ = 0;
+  }
+
+  // Breathing-aware presence hold:
+  // If detector says IDLE but breathing + phase signals indicate a person,
+  // override to MOTION (stationary presence). Auto-releases after PRESENCE_HOLD_MAX.
+  MotionState effective_state = state;
+  if (state == MotionState::IDLE && this->detector_->is_ready()
+      && this->detector_->are_idle_baselines_initialized()) {
+    float breath = this->detector_->get_breathing_score();
+    float phase  = this->detector_->get_last_phase_turbulence();
+    float idle_phase = this->detector_->get_idle_mean_phase_turbulence();
+    // Use idle_amplitude_baseline as proxy for breathing baseline (quiet breathing ~ 0)
+    float idle_breath = this->detector_->get_idle_amplitude_baseline() * 0.01f;
+    if (idle_breath < 0.001f) idle_breath = 0.001f;  // floor
+
+    bool breathing_elevated = breath > idle_breath * BREATHING_HOLD_FACTOR;
+    bool phase_elevated = idle_phase > 0.001f && phase > idle_phase * PHASE_HOLD_FACTOR;
+
+    if (breathing_elevated && phase_elevated && this->presence_hold_expired_) {
+      // Hold already timed out: stay released until signals drop or real motion occurs
+    } else if (breathing_elevated && phase_elevated) {
+      if (!this->presence_hold_active_) {
+        ESP_LOGI(TAG, "Presence hold: breathing=%.4f (>%.4f) phase=%.4f (>%.4f)",
+                 breath, idle_breath * BREATHING_HOLD_FACTOR,
+                 phase, idle_phase * PHASE_HOLD_FACTOR);
+        this->presence_hold_active_ = true;
+      }
+      this->presence_hold_count_++;
+      if (this->presence_hold_count_ < PRESENCE_HOLD_MAX) {
+        effective_state = MotionState::MOTION;
+      } else {
+        ESP_LOGW(TAG, "Presence hold auto-released after %d intervals", PRESENCE_HOLD_MAX);
+        this->presence_hold_active_ = false;
+        this->presence_hold_count_ = 0;
+        this->presence_hold_expired_ = true;
+      }
+    } else {
+      if (this->presence_hold_active_) {
+        ESP_LOGI(TAG, "Presence hold released (signals below threshold)");
+      }
+      this->presence_hold_active_ = false;
+      this->presence_hold_count_ = 0;
+      this->presence_hold_expired_ = false;
+    }
+  } else if (state == MotionState::MOTION) {
+    // Real motion — reset hold state
+    this->presence_hold_active_ = false;
+    this->presence_hold_count_ = 0;
+    this->presence_hold_expired_ = false;
+  }
+
+  // Publish all sensors
+  this->sensor_publisher_.publish_all(this->detector_, effective_state);
+}
+
+void ESpectreComponent::process_calibration_result_() {
+  const uint8_t *band = this->cal_result_band_valid_ ? this->cal_result_band_ : nullptr;
+  const uint8_t size = this->cal_result_band_size_;
+  const std::vector<float> &cal_values = this->cal_result_values_;
+  const bool success = this->cal_result_success_;
+
+  if (success) {
+    // Only update subcarriers if auto-selected (not user-specified)
+    if (!this->user_specified_subcarriers_ && band != nullptr) {
+      memcpy(this->selected_subcarriers_, band, size);
+      this->csi_manager_.update_subcarrier_selection(this->selected_subcarriers_);
+    }
+  }
+
+  // Apply adaptive threshold if calibration produced valid data
+  if (band != nullptr && !cal_values.empty()) {
+    float adaptive_threshold;
+    uint8_t percentile;
+    calculate_adaptive_threshold(cal_values, this->threshold_mode_, adaptive_threshold, percentile);
+
+    this->best_pxx_ = adaptive_threshold;
+
+    if (this->threshold_mode_ != ThresholdMode::MANUAL) {
+      this->set_threshold_runtime(adaptive_threshold);
+      ESP_LOGD(TAG, "Adaptive threshold: %.4f (P%d)", adaptive_threshold, percentile);
+    } else {
+      ESP_LOGD(TAG, "Using manual threshold: %.2f (adaptive would be: %.2f)",
+               this->segmentation_threshold_, adaptive_threshold);
+    }
+
+    // Clear detector buffer (applied by the CSI task before the next packet)
+    this->csi_manager_.request_detector_clear();
+    this->sensor_publisher_.reset_rate_counter();
+  }
+
+  this->traffic_generator_.resume();
+
+  if (this->calibrate_switch_ != nullptr) {
+    static_cast<ESpectreCalibrateSwitch *>(this->calibrate_switch_)->set_calibrating(false);
+  }
+
+  ESP_LOGI(TAG, "Calibration result applied in main loop (%s)", success ? "success" : "failed");
+  ESP_LOGD(TAG, "[resources] Post-calibration heap: %lu bytes",
+           (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
+}
+
+void ESpectreComponent::process_ble_telemetry_() {
+#ifdef USE_ESP32_BLE_SERVER
+  if (!this->ble_telemetry_pending_.exchange(false, std::memory_order_acquire)) {
+    return;
+  }
+  if (!this->ble_channel_enabled_ || !this->ble_client_connected_ || this->ble_telemetry_char_ == nullptr) {
+    return;
+  }
+  const uint32_t now = millis();
+  if (now - this->last_ble_telemetry_ms_ < this->ble_telemetry_interval_ms_) {
+    return;
+  }
+  this->last_ble_telemetry_ms_ = now;
+
+  float movement;
+  float threshold;
+  portENTER_CRITICAL(&this->ble_telemetry_mux_);
+  movement = this->ble_telemetry_movement_;
+  threshold = this->ble_telemetry_threshold_;
+  portEXIT_CRITICAL(&this->ble_telemetry_mux_);
+
+  std::vector<uint8_t> payload(sizeof(float) * 2);
+  memcpy(payload.data(), &movement, sizeof(float));
+  memcpy(payload.data() + sizeof(float), &threshold, sizeof(float));
+  this->ble_telemetry_char_->set_value(std::move(payload));
+  this->ble_telemetry_char_->notify();
+#endif
 }
 
 void ESpectreComponent::loop() {
+  // All ESPHome API work runs here. Other tasks (WiFi/CSI, sys_evt, nbvi_cal)
+  // only hand over state through atomics.
+  this->process_wifi_events_();
+
+  // Calibration result first: auto-cal in the publish step may start a new one
+  if (this->cal_result_pending_.load(std::memory_order_acquire)) {
+    this->process_calibration_result_();
+    this->cal_result_pending_.store(false, std::memory_order_release);
+  }
+
+  // Gain lock completed in the CSI task -> start band/baseline calibration
+  if (this->gain_lock_pending_.exchange(false, std::memory_order_acquire)) {
+    ESP_LOGI(TAG, "Gain lock done - starting calibration (main loop)");
+    this->start_calibration_();
+  }
+
+  if (this->publish_pending_.exchange(false, std::memory_order_acquire)) {
+    const auto state = static_cast<MotionState>(this->pending_state_.load(std::memory_order_relaxed));
+    this->process_csi_publish_(state, this->pending_packets_.load(std::memory_order_relaxed));
+  }
+
+  this->process_ble_telemetry_();
+
   // Drain UDP packets in external traffic mode
   if (this->udp_listener_.is_running()) {
     this->udp_listener_.loop();
@@ -397,7 +553,7 @@ void ESpectreComponent::start_calibration_() {
 
     // Use unified default subcarriers
     memcpy(this->selected_subcarriers_, DEFAULT_SUBCARRIERS, 12);
-    this->csi_manager_.update_subcarrier_selection(DEFAULT_SUBCARRIERS);
+    this->csi_manager_.update_subcarrier_selection(this->selected_subcarriers_);
 
     // Update switch state
     if (this->calibrate_switch_ != nullptr) {
@@ -426,47 +582,19 @@ void ESpectreComponent::start_calibration_() {
     ESP_LOGW(TAG, "Threshold mode: min - maximum sensitivity, may cause false positives");
   }
 
-  // Common callback for all calibrators
+  // Calibration result callback (runs in the nbvi_cal task): copy the result and
+  // let loop() apply it (threshold/switch publish, subcarrier update).
   auto calibration_callback = [this](const uint8_t* band, uint8_t size,
                                      const std::vector<float>& cal_values, bool success) {
-    if (success) {
-      // Only update subcarriers if auto-selected (not user-specified)
-      if (!this->user_specified_subcarriers_) {
-        memcpy(this->selected_subcarriers_, band, size);
-        this->csi_manager_.update_subcarrier_selection(band);
-      }
+    const uint8_t safe_size = std::min<uint8_t>(size, sizeof(this->cal_result_band_));
+    this->cal_result_band_valid_ = (band != nullptr);
+    if (band != nullptr) {
+      memcpy(this->cal_result_band_, band, safe_size);
     }
-
-    // Apply adaptive threshold if calibration produced valid data
-    if (band != nullptr && !cal_values.empty()) {
-      float adaptive_threshold;
-      uint8_t percentile;
-      calculate_adaptive_threshold(cal_values, this->threshold_mode_, adaptive_threshold, percentile);
-
-      this->best_pxx_ = adaptive_threshold;
-
-      if (this->threshold_mode_ != ThresholdMode::MANUAL) {
-        this->set_threshold_runtime(adaptive_threshold);
-        ESP_LOGD(TAG, "Adaptive threshold: %.4f (P%d)", adaptive_threshold, percentile);
-      } else {
-        ESP_LOGD(TAG, "Using manual threshold: %.2f (adaptive would be: %.2f)",
-                 this->segmentation_threshold_, adaptive_threshold);
-      }
-
-      // Clear detector buffer
-      this->csi_manager_.clear_detector_buffer();
-      this->sensor_publisher_.reset_rate_counter();
-    }
-
-    this->traffic_generator_.resume();
-
-    if (this->calibrate_switch_ != nullptr) {
-      static_cast<ESpectreCalibrateSwitch *>(this->calibrate_switch_)->set_calibrating(false);
-    }
-
-    ESP_LOGD(TAG, "Calibration %s", success ? "completed successfully" : "failed");
-    ESP_LOGD(TAG, "[resources] Post-calibration heap: %lu bytes",
-             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
+    this->cal_result_band_size_ = safe_size;
+    this->cal_result_values_ = cal_values;
+    this->cal_result_success_ = success;
+    this->cal_result_pending_.store(true, std::memory_order_release);
   };
 
   // Start calibration using NBVI
@@ -556,6 +684,7 @@ void ESpectreComponent::send_system_info_ble_() {
 void ESpectreComponent::on_ble_client_connected_(uint16_t conn_id) {
   (void) conn_id;
   this->ble_client_connected_ = true;
+  this->ble_telemetry_active_.store(this->ble_channel_enabled_, std::memory_order_relaxed);
   this->last_ble_telemetry_ms_ = 0;
   this->send_system_info_ble_();
 }
@@ -567,6 +696,8 @@ void ESpectreComponent::on_ble_client_disconnected_(uint16_t conn_id) {
 #else
   this->ble_client_connected_ = false;
 #endif
+  this->ble_telemetry_active_.store(this->ble_channel_enabled_ && this->ble_client_connected_,
+                                    std::memory_order_relaxed);
 }
 
 void ESpectreComponent::handle_ble_control_command_(const std::string &command) {

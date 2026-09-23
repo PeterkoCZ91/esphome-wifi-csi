@@ -110,7 +110,7 @@ mqtt:
         - lambda: |-
             float c = atof(x.c_str());
             if (c >= 5.0f && c <= 20.0f)
-              id(espectre_csi).get_detector()->configure_lowpass(true, c);
+              id(espectre_csi).request_lowpass_cutoff(c);
     - topic: esphome/csi_node_c6/command/recalibrate
       then:
         - lambda: |-
