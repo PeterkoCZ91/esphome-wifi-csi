@@ -216,7 +216,11 @@ void BaseDetector::process_packet(const int8_t* csi_data, size_t csi_len,
             // Accumulate inter-subcarrier phase differences
             // Differencing adjacent subcarriers cancels common-mode phase rotation (HW artifact)
             if (has_prev_phase && num_phase_diffs < HT20_SELECTED_BAND_SIZE) {
-                phase_diffs[num_phase_diffs++] = phase - prev_phase;
+                // Wrap to [-π, π]: raw atan2 differences can jump by 2π and dominate the std
+                float dphi = phase - prev_phase;
+                if (dphi > 3.14159265f) dphi -= TWO_PI;
+                else if (dphi < -3.14159265f) dphi += TWO_PI;
+                phase_diffs[num_phase_diffs++] = dphi;
             }
             prev_phase = phase;
             has_prev_phase = true;

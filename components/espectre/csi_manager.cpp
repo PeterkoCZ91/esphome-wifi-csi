@@ -179,6 +179,9 @@ void CSIManager::process_packet(wifi_csi_info_t* data) {
   // Detect HT40 (256 bytes = 128 SC) vs STBC-doubled HT20 (also 256 bytes but cwb==0).
   // On HE chips cwb is not available; fall back to treating 256-byte frames as STBC.
   bool is_ht40 = false;
+  // Remap buffer for short HT20 frames. Declared at function scope because csi_data
+  // may point into it after the branch below (calibrator/detector use it).
+  int8_t csi_remapped[HT20_CSI_LEN];
 #if !CONFIG_SOC_WIFI_HE_SUPPORT
   if (csi_len == HT40_CSI_LEN && rx.cwb == 1) {
     is_ht40 = true;
@@ -212,7 +215,6 @@ void CSIManager::process_packet(wifi_csi_info_t* data) {
 
     // Fallback for short HT20 seen on C5 and potentially on other targets/AP combinations: 114 bytes maps to 57 complex samples with DC already present
     // We pad guards to fit our internal HT20 layout (64 SC, 128 bytes).
-    int8_t csi_remapped[HT20_CSI_LEN];
     if (csi_len == HT20_CSI_LEN_SHORT) {
       std::memset(csi_remapped, 0, sizeof(csi_remapped));
       std::memcpy(&csi_remapped[HT20_CSI_LEN_SHORT_LEFT_PAD], csi_data, HT20_CSI_LEN_SHORT);

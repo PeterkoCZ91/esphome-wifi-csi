@@ -260,7 +260,9 @@ void ESpectreComponent::on_wifi_connected_() {
           bool breathing_elevated = breath > idle_breath * BREATHING_HOLD_FACTOR;
           bool phase_elevated = idle_phase > 0.001f && phase > idle_phase * PHASE_HOLD_FACTOR;
 
-          if (breathing_elevated && phase_elevated) {
+          if (breathing_elevated && phase_elevated && this->presence_hold_expired_) {
+            // Hold already timed out: stay released until signals drop or real motion occurs
+          } else if (breathing_elevated && phase_elevated) {
             if (!this->presence_hold_active_) {
               ESP_LOGI(TAG, "Presence hold: breathing=%.4f (>%.4f) phase=%.4f (>%.4f)",
                        breath, idle_breath * BREATHING_HOLD_FACTOR,
@@ -274,6 +276,7 @@ void ESpectreComponent::on_wifi_connected_() {
               ESP_LOGW(TAG, "Presence hold auto-released after %d intervals", PRESENCE_HOLD_MAX);
               this->presence_hold_active_ = false;
               this->presence_hold_count_ = 0;
+              this->presence_hold_expired_ = true;
             }
           } else {
             if (this->presence_hold_active_) {
@@ -281,11 +284,13 @@ void ESpectreComponent::on_wifi_connected_() {
             }
             this->presence_hold_active_ = false;
             this->presence_hold_count_ = 0;
+            this->presence_hold_expired_ = false;
           }
         } else if (state == MotionState::MOTION) {
           // Real motion — reset hold state
           this->presence_hold_active_ = false;
           this->presence_hold_count_ = 0;
+          this->presence_hold_expired_ = false;
         }
 
         // Publish all sensors

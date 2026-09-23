@@ -301,6 +301,7 @@ class ESpectreComponent : public Component {
   // but measurable breathing-band energy and elevated phase turbulence.
   bool presence_hold_active_{false};
   uint16_t presence_hold_count_{0};        // consecutive intervals in hold
+  bool presence_hold_expired_{false};     // hold timed out; re-arm only after signals drop or real motion
   static constexpr uint16_t PRESENCE_HOLD_MAX = 300;  // ~5 min at 1Hz — auto-release safety
   static constexpr float BREATHING_HOLD_FACTOR = 2.0f;  // breathing_score > baseline × factor
   static constexpr float PHASE_HOLD_FACTOR = 1.5f;      // phase_turb > idle_baseline × factor

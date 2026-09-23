@@ -15,6 +15,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Build with ESPHome ≥ 2026.8 — C5/C6 templates used `IPAddress::str()`, which was removed; now use `str_to()`
 - `LICENSE` now contains the full GPLv3 text; copyright notices moved to `NOTICE`
+- Out-of-scope stack buffer used for remapped short (114-byte) HT20 CSI frames on ESP32-C5 (`-Wdangling-pointer`)
+- Phase turbulence: inter-subcarrier phase differences are now wrapped to [-π, π]; previously 2π jumps inflated the value (affects `phase_turbulence_sensor`, presence logic and ML feature 12)
+- Breathing-aware presence hold no longer re-arms immediately after its 300-interval safety timeout; it re-arms only after the signals drop or real motion occurs
 
 ---
 
