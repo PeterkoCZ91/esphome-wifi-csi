@@ -52,6 +52,9 @@ jobs:
       - name: Compile example — minimal self-sensing
         run: esphome compile examples/minimal_self_sensing.yaml
 
+      - name: Compile example — minimal self-sensing (ESP32-C3)
+        run: esphome compile examples/minimal_self_sensing_c3.yaml
+
       - name: Compile example — pairwise TX
         run: esphome compile examples/pairwise_tx_node.yaml
 

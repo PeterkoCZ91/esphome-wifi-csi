@@ -343,6 +343,7 @@ See [docs/ml_pipeline.md](docs/ml_pipeline.md) for full details.
 | ATOM S3 Lite | ESP32-S3 | 2.4 GHz | ✗ (MAC starvation) |
 | ESP32-CAM | ESP32-D0WD | 2.4 GHz | ✗ |
 | ESP32 DevKit | ESP32-D0WD-V3 | 2.4 GHz | ✗ |
+| ESP32-C3 boards (DevKitM-1, XIAO, SuperMini) | ESP32-C3 | 2.4 GHz | ✗ — compile-tested only, see [`examples/minimal_self_sensing_c3.yaml`](examples/minimal_self_sensing_c3.yaml) |
 | FireBeetle ESP32-C6 (DFR1075) | ESP32-C6 | 2.4 GHz WiFi 6 | ✓ |
 | FireBeetle ESP32-C5 (DFR1222) | ESP32-C5 | 2.4 / 5 GHz | ✓ |
 

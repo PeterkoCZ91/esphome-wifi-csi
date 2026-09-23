@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **ESP32-C3 example** — `examples/minimal_self_sensing_c3.yaml` (board + `variant: ESP32C3`), compiled in CI ([#1](https://github.com/PeterkoCZ91/esphome-wifi-csi/issues/1))
+
+### Fixed
+
+- `LICENSE` now contains the full GPLv3 text; copyright notices moved to `NOTICE`
+
+---
+
 ## [1.0.0] — 2026-05-19
 
 First public release. Based on upstream [ESPectre v2.7](https://github.com/francescopace/espectre).

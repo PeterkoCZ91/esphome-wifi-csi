@@ -1,0 +1,52 @@
+# Minimal self-sensing node — ESP32-C3
+#
+# Same as minimal_self_sensing.yaml, but for ESP32-C3 boards (RISC-V, 2.4 GHz only).
+# The node captures CSI from its own AP-link beacons (router transmissions).
+#
+# Board: generic ESP32-C3 DevKitM-1. For other C3 boards change `board:`, e.g.
+#   Seeed Studio XIAO ESP32C3 -> seeed_xiao_esp32c3
+#   ESP32-C3 SuperMini        -> esp32-c3-devkitm-1 (works as-is)
+#
+# Status: compile-tested in CI; not yet validated on hardware by the maintainer.
+#
+# Flash: esphome run examples/minimal_self_sensing_c3.yaml
+
+substitutions:
+  node_name: "csi-presence-c3"
+  friendly_name: "CSI Presence C3"
+
+esphome:
+  name: ${node_name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32-c3-devkitm-1
+  variant: ESP32C3
+  framework:
+    type: esp-idf
+    version: recommended
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [ espectre ]
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+mqtt:
+  broker: !secret mqtt_broker
+  username: !secret mqtt_username
+  password: !secret mqtt_password
+  topic_prefix: esphome/${node_name}
+
+espectre:
+  id: espectre_csi
+  movement_sensor:
+    name: "Movement Score"
+  breathing_rate_sensor:
+    name: "Breathing Rate"
+  presence_sensor:
+    name: "Presence Detected"
