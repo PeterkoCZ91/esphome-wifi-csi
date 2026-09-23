@@ -95,6 +95,7 @@ BaseDetector::BaseDetector(BaseDetector&& other) noexcept
     std::memcpy(amplitude_buffer_, other.amplitude_buffer_, sizeof(amplitude_buffer_));
     std::memcpy(csi_static_, other.csi_static_, sizeof(csi_static_));
     std::memcpy(csi_phase_prev_t_, other.csi_phase_prev_t_, sizeof(csi_phase_prev_t_));
+    copy_breathing_state_(other);
 
     // Transfer ownership - null out source pointer
     other.turbulence_buffer_ = nullptr;
@@ -135,11 +136,27 @@ BaseDetector& BaseDetector::operator=(BaseDetector&& other) noexcept {
         std::memcpy(amplitude_buffer_, other.amplitude_buffer_, sizeof(amplitude_buffer_));
         std::memcpy(csi_static_, other.csi_static_, sizeof(csi_static_));
         std::memcpy(csi_phase_prev_t_, other.csi_phase_prev_t_, sizeof(csi_phase_prev_t_));
+        copy_breathing_state_(other);
 
         // Transfer ownership - null out source pointer
         other.turbulence_buffer_ = nullptr;
     }
     return *this;
+}
+
+void BaseDetector::copy_breathing_state_(const BaseDetector& other) {
+    breathing_filter_ = other.breathing_filter_;
+    idle_breathing_baseline_ = other.idle_breathing_baseline_;
+    idle_breath_updates_ = other.idle_breath_updates_;
+    std::memcpy(bpm_buf_, other.bpm_buf_, sizeof(bpm_buf_));
+    std::memcpy(bpm_time_buf_, other.bpm_time_buf_, sizeof(bpm_time_buf_));
+    bpm_buf_idx_ = other.bpm_buf_idx_;
+    bpm_buf_count_ = other.bpm_buf_count_;
+    bpm_downsample_cnt_ = other.bpm_downsample_cnt_;
+    breathing_rate_bpm_ = other.breathing_rate_bpm_;
+    fs_window_start_us_ = other.fs_window_start_us_;
+    fs_window_count_ = other.fs_window_count_;
+    fs_estimate_ = other.fs_estimate_;
 }
 
 // ============================================================================
@@ -267,6 +284,8 @@ void BaseDetector::process_packet(const int8_t* csi_data, size_t csi_len,
     }
 
     // Breathing bandpass: filter amplitude_sum at packet rate
+    // (filter coefficients follow the measured packet rate)
+    update_sample_rate_estimate_(esp_timer_get_time());
     float amp_sum = 0.0f;
     for (uint8_t i = 0; i < num_amplitudes_; i++) amp_sum += amplitude_buffer_[i];
     float breath_filtered = breathing_filter_apply(&breathing_filter_, amp_sum);
@@ -450,15 +469,29 @@ void BaseDetector::update_idle_baselines(float turbulence, float phase_turb, flo
 
     float alpha = 1.0f / static_cast<float>(window_size_);
 
+    const float breath = breathing_filter_get_score(&breathing_filter_);
+
     if (!idle_baselines_initialized_) {
         idle_mean_turbulence_ = turbulence;
         idle_mean_phase_turb_ = phase_turb;
         idle_amplitude_baseline_ = amplitude_sum;
+        idle_breathing_baseline_ = breath;
         idle_baselines_initialized_ = true;
     } else {
         idle_mean_turbulence_ = alpha * turbulence + (1.0f - alpha) * idle_mean_turbulence_;
         idle_mean_phase_turb_ = alpha * phase_turb + (1.0f - alpha) * idle_mean_phase_turb_;
         idle_amplitude_baseline_ = alpha * amplitude_sum + (1.0f - alpha) * idle_amplitude_baseline_;
+
+        // Breathing baseline: minimum-tracking EMA (per packet, time constants in seconds
+        // converted with the current packet rate). Fast down, slow up, so the empty-room
+        // floor is learned quickly but a stationary breathing person is not absorbed.
+        const float fs = breathing_filter_.sample_rate;
+        const bool warming_up = static_cast<float>(idle_breath_updates_) < IDLE_BREATH_WARMUP_S * fs;
+        if (warming_up) idle_breath_updates_++;
+        const float tau_s = (warming_up || breath < idle_breathing_baseline_) ? IDLE_BREATH_DOWN_TAU_S
+                                                                               : IDLE_BREATH_UP_TAU_S;
+        const float breath_alpha = 1.0f / (tau_s * fs);
+        idle_breathing_baseline_ += breath_alpha * (breath - idle_breathing_baseline_);
     }
 }
 
@@ -472,6 +505,37 @@ float BaseDetector::get_idle_mean_phase_turbulence() const {
 
 float BaseDetector::get_idle_amplitude_baseline() const {
     return idle_amplitude_baseline_;
+}
+
+float BaseDetector::get_idle_breathing_baseline() const {
+    return (idle_breathing_baseline_ > IDLE_BREATH_FLOOR) ? idle_breathing_baseline_ : IDLE_BREATH_FLOOR;
+}
+
+void BaseDetector::update_sample_rate_estimate_(int64_t now_us) {
+    if (fs_window_start_us_ == 0) {
+        fs_window_start_us_ = now_us;
+        fs_window_count_ = 0;
+        return;
+    }
+    fs_window_count_++;
+    const int64_t elapsed_us = now_us - fs_window_start_us_;
+    if (elapsed_us < FS_WINDOW_US) {
+        return;
+    }
+    if (elapsed_us <= FS_GAP_US) {
+        // Packets per second over this window, smoothed to avoid retune flapping
+        const float measured = static_cast<float>(fs_window_count_) * 1e6f / static_cast<float>(elapsed_us);
+        fs_estimate_ = (fs_estimate_ <= 0.0f) ? measured : 0.7f * fs_estimate_ + 0.3f * measured;
+
+        const float current = breathing_filter_.sample_rate;
+        if (fs_estimate_ >= 1.0f && std::fabs(fs_estimate_ - current) > FS_RETUNE_RATIO * current) {
+            breathing_filter_set_sample_rate(&breathing_filter_, fs_estimate_);
+            ESP_LOGD(TAG, "Breathing filter retuned: %.1f -> %.1f Hz (packet rate)", current, fs_estimate_);
+        }
+    }
+    // A window longer than FS_GAP_US spans a gap (calibration, reconnect): discard it
+    fs_window_start_us_ = now_us;
+    fs_window_count_ = 0;
 }
 
 float BaseDetector::get_breathing_score() const {

@@ -64,8 +64,7 @@ void SensorPublisher::publish_all(const BaseDetector *detector,
       float breath = detector->get_breathing_score();
       float phase = detector->get_last_phase_turbulence();
       float idle_phase = detector->get_idle_mean_phase_turbulence();
-      float idle_breath = detector->get_idle_amplitude_baseline() * 0.01f;
-      if (idle_breath < 0.001f) idle_breath = 0.001f;
+      float idle_breath = detector->get_idle_breathing_baseline();  // floored at 0.001
       bool breathing_elevated = breath > idle_breath * 2.0f;
       bool phase_elevated = idle_phase > 0.001f && phase > idle_phase * 1.5f;
       is_presence = breathing_elevated && phase_elevated;

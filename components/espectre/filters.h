@@ -68,10 +68,17 @@ float hampel_filter(const float *window, size_t window_size,
 float hampel_filter_turbulence(hampel_turbulence_state_t *state, float turbulence);
 
 // =============================================================================
-// Breathing Bandpass Filter (cascaded HP 0.08Hz + LP 0.6Hz at ~100Hz sample rate)
+// Breathing Bandpass Filter (cascaded HP 0.08Hz + LP 0.6Hz, tuned to packet rate)
 // =============================================================================
 // Isolates slow periodic variation (breathing: 0.1-0.5 Hz = 6-30 BPM)
 // from amplitude signal. Energy of filtered signal = breathing score.
+// Coefficients depend on the sample rate (= CSI packet rate, ~8-200 pkt/s),
+// so they are recomputed via breathing_filter_set_sample_rate().
+
+constexpr float BREATHING_HP_CUTOFF_HZ = 0.08f;
+constexpr float BREATHING_LP_CUTOFF_HZ = 0.6f;
+constexpr float BREATHING_ENERGY_TAU_S = 3.0f;         // energy EMA time constant
+constexpr float BREATHING_DEFAULT_SAMPLE_RATE = 100.0f;
 
 struct breathing_filter_state_t {
     // High-pass at 0.08 Hz (removes DC drift, slow environmental changes)
@@ -83,9 +90,18 @@ struct breathing_filter_state_t {
     // Energy estimation (EMA of squared filtered signal)
     float energy;
     bool initialized;
+    // Coefficients for the current sample rate
+    float sample_rate;
+    float hp_b0;
+    float hp_a1;
+    float lp_b0;
+    float lp_a1;
+    float energy_alpha;
 };
 
 void breathing_filter_init(breathing_filter_state_t *state);
+// Recompute coefficients for a new sample rate; keeps the filter state (no reset)
+void breathing_filter_set_sample_rate(breathing_filter_state_t *state, float sample_rate_hz);
 float breathing_filter_apply(breathing_filter_state_t *state, float amplitude_sum);
 float breathing_filter_get_score(const breathing_filter_state_t *state);
 

@@ -40,18 +40,33 @@ def median_abs_deviation(x, scale=1.0):
 
 
 # Breathing bandpass filter coefficients (must match csi_filters.cpp)
-BREATH_HP_B0 = 0.99749
-BREATH_HP_A1 = -0.99498
-BREATH_LP_B0 = 0.01850
-BREATH_LP_A1 = -0.96300
-BREATH_ENERGY_ALPHA = 0.00333
+BREATH_HP_CUTOFF_HZ = 0.08
+BREATH_LP_CUTOFF_HZ = 0.6
+BREATH_ENERGY_TAU_S = 3.0
 
 
-def breathing_filter_series(amplitude_sums):
+def breathing_filter_coefficients(fs=100.0):
+    """Coefficients for a given sample rate (packet rate), same formulas as C++
+    breathing_filter_set_sample_rate(): bilinear transform with prewarping."""
+    fs = max(float(fs), 2.0)
+    hp_wc = np.tan(np.pi * BREATH_HP_CUTOFF_HZ / fs)
+    lp_wc = np.tan(np.pi * BREATH_LP_CUTOFF_HZ / fs)
+    return (
+        1.0 / (1.0 + hp_wc), (hp_wc - 1.0) / (1.0 + hp_wc),   # HP b0, a1
+        lp_wc / (1.0 + lp_wc), (lp_wc - 1.0) / (1.0 + lp_wc),  # LP b0, a1
+        min(1.0, 1.0 / (BREATH_ENERGY_TAU_S * fs)),             # energy EMA alpha
+    )
+
+
+def breathing_filter_series(amplitude_sums, fs=100.0):
     """Apply breathing bandpass (HP 0.08Hz + LP 0.6Hz) and return energy series.
 
-    Matches C++ breathing_filter_apply() exactly.
+    Matches C++ breathing_filter_apply(); `fs` is the sample rate of
+    `amplitude_sums` in Hz. The firmware retunes to the measured CSI packet
+    rate, so pass the real rate of the input series (default 100 = firmware
+    default before the first rate estimate).
     """
+    hp_b0, hp_a1, lp_b0, lp_a1, energy_alpha = breathing_filter_coefficients(fs)
     n = len(amplitude_sums)
     energy = np.zeros(n, dtype=np.float32)
 
@@ -73,18 +88,18 @@ def breathing_filter_series(amplitude_sums):
             continue
 
         # High-pass
-        hp_out = BREATH_HP_B0 * (x - hp_x_prev) - BREATH_HP_A1 * hp_y_prev
+        hp_out = hp_b0 * (x - hp_x_prev) - hp_a1 * hp_y_prev
         hp_x_prev = x
         hp_y_prev = hp_out
 
         # Low-pass
-        lp_out = BREATH_LP_B0 * (hp_out + lp_x_prev) - BREATH_LP_A1 * lp_y_prev
+        lp_out = lp_b0 * (hp_out + lp_x_prev) - lp_a1 * lp_y_prev
         lp_x_prev = hp_out
         lp_y_prev = lp_out
 
         # Energy (EMA of squared output)
         sq = lp_out * lp_out
-        e = BREATH_ENERGY_ALPHA * sq + (1.0 - BREATH_ENERGY_ALPHA) * e
+        e = energy_alpha * sq + (1.0 - energy_alpha) * e
         energy[i] = np.sqrt(e)
 
     return energy

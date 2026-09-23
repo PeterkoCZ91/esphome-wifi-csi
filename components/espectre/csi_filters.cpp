@@ -170,21 +170,30 @@ float hampel_filter_turbulence(hampel_turbulence_state_t *state, float turbulenc
 // ============================================================================
 // BREATHING BANDPASS FILTER IMPLEMENTATION
 // ============================================================================
-// Cascaded HP (0.08 Hz) + LP (0.6 Hz) at 100 Hz sample rate
-// Pre-computed 1st-order Butterworth coefficients via bilinear transform
+// Cascaded 1st-order Butterworth HP (0.08 Hz) + LP (0.6 Hz) via bilinear transform
+// with prewarping: wc = tan(pi * fc / fs)
+//   HP: b0 = 1/(1+wc),  a1 = (wc-1)/(1+wc)
+//   LP: b0 = wc/(1+wc), a1 = (wc-1)/(1+wc)
+// At fs=100 Hz this gives HP b0=0.99749 a1=-0.99498, LP b0=0.01850 a1=-0.96300.
+// Energy EMA alpha = 1/(tau*fs), tau = 3 s (alpha = 1/300 at 100 Hz).
 
-// HP at 0.08 Hz, fs=100: wc = tan(pi*0.08/100) = 0.002513
-// b0 = 1/(1+wc) = 0.99749, a1 = (wc-1)/(1+wc) = -0.99498
-static constexpr float BREATH_HP_B0 = 0.99749f;
-static constexpr float BREATH_HP_A1 = -0.99498f;
+void breathing_filter_set_sample_rate(breathing_filter_state_t *state, float sample_rate_hz) {
+    if (!state) return;
+    // Nyquist guard: LP cutoff must stay well below fs/2
+    if (!(sample_rate_hz >= 2.0f)) sample_rate_hz = 2.0f;
 
-// LP at 0.6 Hz, fs=100: wc = tan(pi*0.6/100) = 0.01885
-// b0 = wc/(1+wc) = 0.01850, a1 = (wc-1)/(1+wc) = -0.96300
-static constexpr float BREATH_LP_B0 = 0.01850f;
-static constexpr float BREATH_LP_A1 = -0.96300f;
+    const float hp_wc = std::tan(static_cast<float>(M_PI) * BREATHING_HP_CUTOFF_HZ / sample_rate_hz);
+    state->hp_b0 = 1.0f / (1.0f + hp_wc);
+    state->hp_a1 = (hp_wc - 1.0f) / (1.0f + hp_wc);
 
-// Energy EMA alpha: ~3s time constant at 100Hz = alpha = 1/300
-static constexpr float BREATH_ENERGY_ALPHA = 0.00333f;
+    const float lp_wc = std::tan(static_cast<float>(M_PI) * BREATHING_LP_CUTOFF_HZ / sample_rate_hz);
+    state->lp_b0 = lp_wc / (1.0f + lp_wc);
+    state->lp_a1 = (lp_wc - 1.0f) / (1.0f + lp_wc);
+
+    float alpha = 1.0f / (BREATHING_ENERGY_TAU_S * sample_rate_hz);
+    state->energy_alpha = (alpha > 1.0f) ? 1.0f : alpha;
+    state->sample_rate = sample_rate_hz;
+}
 
 void breathing_filter_init(breathing_filter_state_t *state) {
     if (!state) return;
@@ -194,6 +203,7 @@ void breathing_filter_init(breathing_filter_state_t *state) {
     state->lp_y_prev = 0.0f;
     state->energy = 0.0f;
     state->initialized = false;
+    breathing_filter_set_sample_rate(state, BREATHING_DEFAULT_SAMPLE_RATE);
 }
 
 float breathing_filter_apply(breathing_filter_state_t *state, float amplitude_sum) {
@@ -210,18 +220,18 @@ float breathing_filter_apply(breathing_filter_state_t *state, float amplitude_su
     }
 
     // High-pass: y = b0 * (x - x_prev) - a1 * y_prev
-    float hp_out = BREATH_HP_B0 * (amplitude_sum - state->hp_x_prev) - BREATH_HP_A1 * state->hp_y_prev;
+    float hp_out = state->hp_b0 * (amplitude_sum - state->hp_x_prev) - state->hp_a1 * state->hp_y_prev;
     state->hp_x_prev = amplitude_sum;
     state->hp_y_prev = hp_out;
 
     // Low-pass: y = b0 * (x + x_prev) - a1 * y_prev
-    float lp_out = BREATH_LP_B0 * (hp_out + state->lp_x_prev) - BREATH_LP_A1 * state->lp_y_prev;
+    float lp_out = state->lp_b0 * (hp_out + state->lp_x_prev) - state->lp_a1 * state->lp_y_prev;
     state->lp_x_prev = hp_out;
     state->lp_y_prev = lp_out;
 
     // Energy estimation: EMA of squared signal
     float sq = lp_out * lp_out;
-    state->energy = BREATH_ENERGY_ALPHA * sq + (1.0f - BREATH_ENERGY_ALPHA) * state->energy;
+    state->energy = state->energy_alpha * sq + (1.0f - state->energy_alpha) * state->energy;
 
     return lp_out;
 }

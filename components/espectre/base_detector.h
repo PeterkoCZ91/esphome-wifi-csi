@@ -324,6 +324,20 @@ public:
     float get_idle_amplitude_baseline() const;
 
     /**
+     * Get idle-gated breathing-score baseline (floor 0.001).
+     * Minimum-tracking EMA of the breathing score while IDLE: follows drops
+     * within ~10 s, rises only over ~10 min, so a person breathing nearby
+     * is not absorbed into the baseline within seconds. During the first
+     * ~30 s of IDLE updates it tracks both ways at the fast rate (warm-up).
+     */
+    float get_idle_breathing_baseline() const;
+
+    /**
+     * Get the packet rate the breathing filter is currently tuned to (Hz)
+     */
+    float get_breathing_filter_sample_rate() const { return breathing_filter_.sample_rate; }
+
+    /**
      * Check if idle baselines have been initialized (at least one IDLE update)
      */
     bool are_idle_baselines_initialized() const { return idle_baselines_initialized_; }
@@ -401,10 +415,26 @@ protected:
     float idle_mean_turbulence_{0.0f};
     float idle_mean_phase_turb_{0.0f};
     float idle_amplitude_baseline_{0.0f};
+    float idle_breathing_baseline_{0.0f};
     bool idle_baselines_initialized_{false};
+    static constexpr float IDLE_BREATH_DOWN_TAU_S = 10.0f;   // baseline follows drops quickly
+    static constexpr float IDLE_BREATH_UP_TAU_S = 600.0f;    // ...and rises slowly
+    static constexpr float IDLE_BREATH_FLOOR = 0.001f;
+    static constexpr float IDLE_BREATH_WARMUP_S = 30.0f;     // symmetric fast tracking while the energy EMA settles
+    uint32_t idle_breath_updates_{0};
 
     // Breathing bandpass filter (0.08-0.6 Hz on amplitude_sum, per-packet)
     breathing_filter_state_t breathing_filter_{};
+
+    // Packet-rate estimate for retuning the breathing filter (1 s windows)
+    static constexpr int64_t FS_WINDOW_US = 1000000;
+    static constexpr int64_t FS_GAP_US = 2000000;        // longer window = gap (calibration), discard
+    static constexpr float FS_RETUNE_RATIO = 0.10f;      // retune when estimate differs by >10%
+    int64_t fs_window_start_us_{0};
+    uint32_t fs_window_count_{0};
+    float fs_estimate_{0.0f};
+    void update_sample_rate_estimate_(int64_t now_us);
+    void copy_breathing_state_(const BaseDetector& other);
 
     // Breathing rate BPM estimation (DFT on downsampled bandpass output)
     static constexpr uint8_t  BPM_BUF_SIZE   = 64;    // samples (~16-64s depending on packet rate)
