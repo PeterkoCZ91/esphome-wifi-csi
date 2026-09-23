@@ -9,21 +9,23 @@ In standard (single-node) mode, the ESP32 captures CSI from its own AP-link beac
 1. **No spatial diversity** — one node, one coverage zone
 2. **AP-link pollution** — the AP-link path goes through many walls and picks up motion from adjacent rooms
 
-Pairwise sensing uses short-range ESP-NOW packets between nodes you place deliberately. The CSI captured is only the path between those two nodes — a clean, controlled sensing zone.
+Pairwise sensing uses probe packets (ESP-NOW broadcast, or UDP via the AP for C5/C6 receivers) between nodes you place deliberately. The CSI captured is only the path between those two nodes — a clean, controlled sensing zone.
 
 ## Mesh topologies
 
-### 5 GHz star mesh (ESP32-C5, production)
+### ESP32-C5 star mesh
+
+> **Band:** the component defaults to 2.4 GHz. Running this mesh on 5 GHz (e.g. channel 52) requires `band_mode: 5ghz` on every C5 node and is **experimental** — releases up to v1.0.0 forced the C5 into 2.4 GHz-only mode, so the ML results below were not obtained on 5 GHz with the published code.
 
 ```
-C5a (TX, 200 pkt/s, ch52)
+C5a (TX, 200 pkt/s)
     ├──→ C5b (RX, peer_mac=C5a)
     ├──→ C5c (RX, peer_mac=C5a)
     └──→ C5d (RX, peer_mac=C5a)
 ```
 
 - 3 RX nodes cover the room from different angles
-- 45-feature ML input (15 features × 3 RX nodes)
+- 45-feature input to the off-device fusion model (15 features × 3 RX nodes, `ml_inference_service.py`)
 - Cross-validated F1 = 0.833 on sit/walk/empty
 
 ### 2.4 GHz triangle mesh (ESP32-D0WD + ATOM S3, experimental)
@@ -71,7 +73,7 @@ espectre:
     - "AA:BB:CC:DD:EE:FE"   # Node B TX
 ```
 
-This calls `CSIManager::add_extra_peer_mac()` for each additional MAC. The CSI callback filters packets by MAC against both the primary peer and up to 4 extra peers (`MAX_EXTRA_PEER_MACS = 4`).
+The first MAC becomes the primary peer; `CSIManager::add_extra_peer_mac()` is called for each additional one. The CSI callback filters packets in software against the primary peer and up to 4 extra peers (`MAX_EXTRA_PEER_MACS = 4`), i.e. at most 5 entries — the config schema rejects longer lists. The filter additionally accepts broadcast frames and frames from the AP BSSID.
 
 Single `peer_mac` still works and remains the primary configuration for star-topology setups.
 

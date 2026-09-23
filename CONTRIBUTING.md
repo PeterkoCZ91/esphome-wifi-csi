@@ -4,14 +4,14 @@
 
 - ESP32-S3 (ATOM S3 Lite, M5Stack) — 2.4 GHz self-sensing
 - ESP32-C6 (DFRobot DFR1075) — WiFi 6 2.4 GHz self-sensing
-- ESP32-C5 (DFRobot FireBeetle 2 DFR1222) — 5 GHz pairwise sensing via ESP-NOW
+- ESP32-C5 (DFRobot FireBeetle 2 DFR1222) — pairwise sensing; 5 GHz is experimental (`band_mode: 5ghz`)
 - MQTT broker (e.g. Mosquitto) on your local network
 
 ## Getting started
 
 1. Clone the repo
 2. Copy `secrets.yaml.example` → `secrets.yaml` and fill in your values
-3. Install ESPHome: `pip install esphome`
+3. Install ESPHome (Python 3.12+): `pip install -r requirements-ci.txt` for the version CI uses, or `pip install esphome`
 4. Flash a node:
    ```bash
    esphome run espectre-c5-template.yaml

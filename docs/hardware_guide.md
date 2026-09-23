@@ -7,7 +7,7 @@
 | ESP32-CAM | ESP32-D0WD | 2.4 GHz | TX or RX | No external antenna needed for pairwise |
 | M5Stack ATOM S3 Lite | ESP32-S3 | 2.4 GHz | TX or RX | Compact form factor, no PSRAM needed |
 | ESP32-D0WD-V3 (DevKit) | ESP32-D0WD-V3 | 2.4 GHz | TX or RX | Classic ESP32, TX+RX limitation applies |
-| DFRobot FireBeetle ESP32-C5 (DFR1222) | ESP32-C5 | 2.4 / 5 GHz | TX or RX | Preferred for 5 GHz and dual TX+RX |
+| DFRobot FireBeetle ESP32-C5 (DFR1222) | ESP32-C5 | 2.4 GHz (5 GHz experimental) | TX or RX | Only dual-band chip; dual TX+RX |
 | DFRobot FireBeetle ESP32-C6 (DFR1075) | ESP32-C6 | 2.4 GHz | TX or RX | WiFi 6 (802.11ax), full TX+RX support |
 
 ## Choosing hardware for your deployment
@@ -16,11 +16,18 @@
 
 Both chips have a dedicated hardware channel estimation path that runs independently of the MAC TX scheduler. This means:
 
-- You can configure a node as both TX (200 pkt/s ESP-NOW) and RX simultaneously
+- You can configure a node as both TX (e.g. 200 pkt/s) and RX simultaneously
 - CSI capture rate remains at the full TX rate (200 CSI packets/second received)
 - Enables bidirectional links in the mesh (every node can be both TX and RX)
 
-Use ESP32-C5 for 5 GHz operation (channel 52, 5.26 GHz, O2/AVM Fritz!Box compatible).
+ESP32-C5 can use 5 GHz, but only when enabled explicitly — the component defaults to 2.4 GHz:
+
+```yaml
+espectre:
+  band_mode: 5ghz   # 2.4ghz (default) | 5ghz | auto — ESP32-C5 only
+```
+
+5 GHz is **experimental**: releases up to v1.0.0 forced the C5 into 2.4 GHz-only mode, so 5 GHz operation has not been validated with the published code. Check the channel (`ch:` in the device log) after enabling it.
 Use ESP32-C6 for 2.4 GHz WiFi 6 environments.
 
 ### For budget 2.4 GHz deployments: classic ESP32 (ATOM S3, DevKit, ESP32-CAM)
@@ -56,7 +63,7 @@ espectre:
     - "11:22:33:44:55:66"   # Second TX node MAC
 ```
 
-Maximum 4 entries in `peer_macs` (hardware limit: `MAX_EXTRA_PEER_MACS = 4`).
+Maximum 5 entries in `peer_macs`: one primary peer plus `MAX_EXTRA_PEER_MACS = 4` extra peers (software filter in `CSIManager`). The config schema rejects longer lists.
 
 ### TX-only node (broadcasts ESP-NOW, no peer filtering)
 
@@ -101,7 +108,7 @@ Or from ESPHome logs:
 
 ## Flashing
 
-Standard ESPHome OTA (after first flash):
+Standard ESPHome OTA (after the first serial flash; requires `api:` and `ota:` in the YAML, as in the examples):
 ```bash
 .venv/bin/esphome upload espectre-YOUR-NODE.yaml --device 192.168.x.y
 ```

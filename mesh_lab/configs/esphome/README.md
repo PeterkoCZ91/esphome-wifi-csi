@@ -1,6 +1,6 @@
 # ESPHome Mesh Lab Configs
 
-These configs live under `mesh_lab/` and are experimental.
+These configs live under `mesh_lab/` and are experimental. The `mesh-lab-*.yaml` files are **local-only** — they are gitignored and not published in this repository. Use the commands below with your own configs, or start from [`examples/`](../../../examples/).
 
 Before compiling from this directory, provide secrets:
 
