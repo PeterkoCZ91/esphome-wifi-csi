@@ -37,3 +37,4 @@ venv/
 .idea/
 .DS_Store
 .claude/
+.codegraph/
