@@ -435,7 +435,8 @@ esp_err_t CSIManager::disable() {
   // No esp_wifi_set_promiscuous(false) needed — promiscuous mode is no longer used.
 
   enabled_ = false;
-  packet_callback_ = nullptr;
+  // Keep packet_callback_: a CSI callback already running in the WiFi task may still
+  // call it (esp_wifi_set_csi_rx_cb does not wait). enable() replaces it.
   ESP_LOGI(TAG, "CSI disabled and callback unregistered");
   
   return ESP_OK;

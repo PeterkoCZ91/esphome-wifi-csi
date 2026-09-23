@@ -208,6 +208,11 @@ bool TrafficGeneratorManager::start_dns_() {
   ESP_LOGI(TAG, "Target gateway: %s", gw_str);
   
   // Create UDP socket
+  if (sock_ >= 0) {
+    // Left open by a stop() that timed out waiting for the previous task
+    close(sock_);
+    sock_ = -1;
+  }
   sock_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
   if (sock_ < 0) {
     ESP_LOGE(TAG, "Failed to create socket");
@@ -381,6 +386,11 @@ bool TrafficGeneratorManager::start_udp_() {
     return false;
   }
 
+  if (sock_ >= 0) {
+    // Left open by a stop() that timed out waiting for the previous task
+    close(sock_);
+    sock_ = -1;
+  }
   sock_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
   if (sock_ < 0) {
     ESP_LOGE(TAG, "UDP: failed to create socket");

@@ -374,6 +374,13 @@ protected:
      */
     void update_idle_baselines(float turbulence, float phase_turb, float amplitude_sum);
 
+    /**
+     * Update idle-gated baselines from the most recent packet (turbulence,
+     * phase turbulence, amplitude sum). Call from update_state() after the
+     * state transition.
+     */
+    void update_idle_baselines_from_last_packet();
+
     // Buffer state
     float* turbulence_buffer_;
     float amplitude_buffer_[MAX_AMPLITUDE_BUFFER];  // Last packet amplitudes (HT20: 12, HT40: 12)
@@ -420,8 +427,13 @@ protected:
     static constexpr float IDLE_BREATH_DOWN_TAU_S = 10.0f;   // baseline follows drops quickly
     static constexpr float IDLE_BREATH_UP_TAU_S = 600.0f;    // ...and rises slowly
     static constexpr float IDLE_BREATH_FLOOR = 0.001f;
-    static constexpr float IDLE_BREATH_WARMUP_S = 30.0f;     // symmetric fast tracking while the energy EMA settles
+    static constexpr float IDLE_BREATH_SETTLE_S = 10.0f;     // ignore samples while the energy EMA settles
+    static constexpr float IDLE_BREATH_WARMUP_S = 30.0f;     // seed baseline from the minimum seen up to here
+    static constexpr float IDLE_BREATH_ELEVATED_FACTOR = 2.0f;  // must match the presence checks (breath > 2 x baseline)
     uint32_t idle_breath_updates_{0};
+    float idle_breath_min_{0.0f};       // running minimum during warm-up
+    bool idle_breath_ready_{false};     // false until warm-up has seeded the baseline
+    void reset_idle_breathing_baseline_();
 
     // Breathing bandpass filter (0.08-0.6 Hz on amplitude_sum, per-packet)
     breathing_filter_state_t breathing_filter_{};

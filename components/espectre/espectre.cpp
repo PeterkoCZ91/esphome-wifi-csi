@@ -180,6 +180,34 @@ bool ESpectreComponent::on_wifi_connected_() {
     this->traffic_generator_.pre_init();
   }
 
+  // Two-phase calibration:
+  // 1. Gain Lock (~3 seconds, 300 packets) - locks AGC/FFT for stable CSI
+  // 2. Baseline Calibration (~7.5 seconds, 750 packets) - calculates normalization scale
+  // Registered before CSI is enabled (so a gain lock reached on beacon traffic while
+  // the traffic generator is still retrying is not lost), from the main loop. Invoked from the CSI (WiFi) task after 300
+  // packets, or synchronously on chips without gain lock support. It only does
+  // detector-local setup; the calibration start (switch publish, SPIFFS) is
+  // deferred to loop().
+  this->csi_manager_.set_gain_lock_callback([this]() {
+    auto& gc = this->csi_manager_.get_gain_controller();
+    auto mode = gc.get_mode();
+    if (mode == GainLockMode::DISABLED) {
+      ESP_LOGI(TAG, "Gain calibration complete (CV normalization enabled)");
+    } else if (this->csi_manager_.is_gain_locked()) {
+      ESP_LOGI(TAG, "Gain locked");
+    } else {
+      ESP_LOGI(TAG, "Gain calibration complete (strong signal, CV normalization enabled)");
+    }
+
+    // CV normalization: only needed when gain is not locked (AGC varies)
+    // When gain is locked, raw std provides better sensitivity for all band types
+    bool need_cv = gc.needs_cv_normalization();
+    this->detector_->set_cv_normalization(need_cv);
+    this->nbvi_calibrator_.set_cv_normalization(need_cv);
+
+    this->gain_lock_pending_.store(true, std::memory_order_release);
+  });
+
   // Enable CSI. The callback runs in the WiFi task: it only hands the state over
   // to loop(), which does all publishing (ESPHome APIs are not thread-safe).
   if (!this->csi_manager_.is_enabled()) {
@@ -218,33 +246,6 @@ bool ESpectreComponent::on_wifi_connected_() {
     }
   }
 
-  // Two-phase calibration:
-  // 1. Gain Lock (~3 seconds, 300 packets) - locks AGC/FFT for stable CSI
-  // 2. Baseline Calibration (~7.5 seconds, 750 packets) - calculates normalization scale
-  // Registered here (main loop). Invoked from the CSI (WiFi) task after 300
-  // packets, or synchronously on chips without gain lock support. It only does
-  // detector-local setup; the calibration start (switch publish, SPIFFS) is
-  // deferred to loop().
-  this->csi_manager_.set_gain_lock_callback([this]() {
-    auto& gc = this->csi_manager_.get_gain_controller();
-    auto mode = gc.get_mode();
-    if (mode == GainLockMode::DISABLED) {
-      ESP_LOGI(TAG, "Gain calibration complete (CV normalization enabled)");
-    } else if (this->csi_manager_.is_gain_locked()) {
-      ESP_LOGI(TAG, "Gain locked");
-    } else {
-      ESP_LOGI(TAG, "Gain calibration complete (strong signal, CV normalization enabled)");
-    }
-
-    // CV normalization: only needed when gain is not locked (AGC varies)
-    // When gain is locked, raw std provides better sensitivity for all band types
-    bool need_cv = gc.needs_cv_normalization();
-    this->detector_->set_cv_normalization(need_cv);
-    this->nbvi_calibrator_.set_cv_normalization(need_cv);
-
-    this->gain_lock_pending_.store(true, std::memory_order_release);
-  });
-
   // Ready to publish sensors (with internal or external traffic)
   this->ready_to_publish_ = true;
   this->threshold_republished_ = false;
@@ -258,10 +259,8 @@ void ESpectreComponent::on_wifi_disconnected_() {
   // Disable CSI using CSI Manager
   this->csi_manager_.disable();
 
-  // Stop traffic generator
-  if (this->traffic_generator_.is_running()) {
-    this->traffic_generator_.stop();
-  }
+  // Stop traffic generator (stop() also cleans up a task that already exited on its own)
+  this->traffic_generator_.stop();
 
   // Stop UDP listener
   if (this->udp_listener_.is_running()) {
@@ -382,9 +381,8 @@ void ESpectreComponent::process_csi_publish_(MotionState state, uint32_t packets
     float breath = this->detector_->get_breathing_score();
     float phase  = this->detector_->get_last_phase_turbulence();
     float idle_phase = this->detector_->get_idle_mean_phase_turbulence();
-    // Use idle_amplitude_baseline as proxy for breathing baseline (quiet breathing ~ 0)
-    float idle_breath = this->detector_->get_idle_amplitude_baseline() * 0.01f;
-    if (idle_breath < 0.001f) idle_breath = 0.001f;  // floor
+    // Idle-gated breathing baseline (+inf until seeded, so no hold during warm-up)
+    float idle_breath = this->detector_->get_idle_breathing_baseline();
 
     bool breathing_elevated = breath > idle_breath * BREATHING_HOLD_FACTOR;
     bool phase_elevated = idle_phase > 0.001f && phase > idle_phase * PHASE_HOLD_FACTOR;

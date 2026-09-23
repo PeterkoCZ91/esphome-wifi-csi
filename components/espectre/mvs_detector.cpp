@@ -77,13 +77,7 @@ void MVSDetector::update_state() {
     state_ = apply_temporal_smoothing(raw_motion);
 
     // Update idle-gated baselines after state transition
-    float turb = get_last_turbulence();
-    float pt = get_last_phase_turbulence();
-    const float* amps = get_last_amplitudes();
-    uint8_t n = get_num_amplitudes();
-    float amp_sum = 0;
-    for (uint8_t i = 0; i < n; i++) amp_sum += amps[i];
-    update_idle_baselines(turb, pt, amp_sum);
+    update_idle_baselines_from_last_packet();
 }
 
 bool MVSDetector::set_threshold(float threshold) {

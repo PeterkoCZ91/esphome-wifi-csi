@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstring>
 #include <new>
+#include <limits>
 #include "esp_timer.h"
 #include "esphome/core/log.h"
 
@@ -56,6 +57,7 @@ BaseDetector::BaseDetector(uint16_t window_size)
     lowpass_filter_init(&lowpass_state_, LOWPASS_CUTOFF_DEFAULT, LOWPASS_SAMPLE_RATE, false);
     hampel_turbulence_init(&hampel_state_, HAMPEL_TURBULENCE_WINDOW_DEFAULT, HAMPEL_TURBULENCE_THRESHOLD_DEFAULT, false);
     breathing_filter_init(&breathing_filter_);
+    reset_idle_breathing_baseline_();
 }
 
 BaseDetector::~BaseDetector() {
@@ -148,6 +150,8 @@ void BaseDetector::copy_breathing_state_(const BaseDetector& other) {
     breathing_filter_ = other.breathing_filter_;
     idle_breathing_baseline_ = other.idle_breathing_baseline_;
     idle_breath_updates_ = other.idle_breath_updates_;
+    idle_breath_min_ = other.idle_breath_min_;
+    idle_breath_ready_ = other.idle_breath_ready_;
     std::memcpy(bpm_buf_, other.bpm_buf_, sizeof(bpm_buf_));
     std::memcpy(bpm_time_buf_, other.bpm_time_buf_, sizeof(bpm_time_buf_));
     bpm_buf_idx_ = other.bpm_buf_idx_;
@@ -343,6 +347,9 @@ void BaseDetector::clear_buffer() {
     running_mean_ = 0.0f;
     running_m2_ = 0.0f;
     state_ = MotionState::IDLE;
+    // Re-seed the breathing baseline (e.g. after recalibration) so an upward drift
+    // frozen by the "elevated" rule can recover
+    reset_idle_breathing_baseline_();
     smooth_history_ = 0;
     smooth_count_ = 0;
 
@@ -469,30 +476,54 @@ void BaseDetector::update_idle_baselines(float turbulence, float phase_turb, flo
 
     float alpha = 1.0f / static_cast<float>(window_size_);
 
-    const float breath = breathing_filter_get_score(&breathing_filter_);
-
     if (!idle_baselines_initialized_) {
         idle_mean_turbulence_ = turbulence;
         idle_mean_phase_turb_ = phase_turb;
         idle_amplitude_baseline_ = amplitude_sum;
-        idle_breathing_baseline_ = breath;
         idle_baselines_initialized_ = true;
     } else {
         idle_mean_turbulence_ = alpha * turbulence + (1.0f - alpha) * idle_mean_turbulence_;
         idle_mean_phase_turb_ = alpha * phase_turb + (1.0f - alpha) * idle_mean_phase_turb_;
         idle_amplitude_baseline_ = alpha * amplitude_sum + (1.0f - alpha) * idle_amplitude_baseline_;
-
-        // Breathing baseline: minimum-tracking EMA (per packet, time constants in seconds
-        // converted with the current packet rate). Fast down, slow up, so the empty-room
-        // floor is learned quickly but a stationary breathing person is not absorbed.
-        const float fs = breathing_filter_.sample_rate;
-        const bool warming_up = static_cast<float>(idle_breath_updates_) < IDLE_BREATH_WARMUP_S * fs;
-        if (warming_up) idle_breath_updates_++;
-        const float tau_s = (warming_up || breath < idle_breathing_baseline_) ? IDLE_BREATH_DOWN_TAU_S
-                                                                               : IDLE_BREATH_UP_TAU_S;
-        const float breath_alpha = 1.0f / (tau_s * fs);
-        idle_breathing_baseline_ += breath_alpha * (breath - idle_breathing_baseline_);
     }
+
+    // Breathing baseline (per packet, time constants in seconds converted with the
+    // current packet rate):
+    //  - warm-up: skip IDLE_BREATH_SETTLE_S while the energy EMA settles, then seed the
+    //    baseline with the minimum seen until IDLE_BREATH_WARMUP_S (not reported before)
+    //  - then: follow drops quickly, rise slowly, and freeze while the score is elevated,
+    //    so a person sitting or sleeping still is never absorbed into the baseline
+    const float breath = breathing_filter_get_score(&breathing_filter_);
+    const float fs = breathing_filter_.sample_rate;
+    if (!idle_breath_ready_) {
+        idle_breath_updates_++;
+        const float elapsed_s = static_cast<float>(idle_breath_updates_) / fs;
+        if (elapsed_s >= IDLE_BREATH_SETTLE_S && breath < idle_breath_min_) {
+            idle_breath_min_ = breath;
+        }
+        if (elapsed_s >= IDLE_BREATH_WARMUP_S) {
+            idle_breathing_baseline_ = idle_breath_min_;
+            idle_breath_ready_ = true;
+            ESP_LOGD(TAG, "Idle breathing baseline seeded: %.4f", idle_breathing_baseline_);
+        }
+    } else if (breath < idle_breathing_baseline_) {
+        idle_breathing_baseline_ += (breath - idle_breathing_baseline_) / (IDLE_BREATH_DOWN_TAU_S * fs);
+    } else if (breath <= IDLE_BREATH_ELEVATED_FACTOR * get_idle_breathing_baseline()) {
+        idle_breathing_baseline_ += (breath - idle_breathing_baseline_) / (IDLE_BREATH_UP_TAU_S * fs);
+    }
+    // else: elevated (likely a stationary person) -> freeze
+}
+
+void BaseDetector::reset_idle_breathing_baseline_() {
+    idle_breath_updates_ = 0;
+    idle_breath_min_ = std::numeric_limits<float>::infinity();
+    idle_breath_ready_ = false;
+}
+
+void BaseDetector::update_idle_baselines_from_last_packet() {
+    float amp_sum = 0.0f;
+    for (uint8_t i = 0; i < num_amplitudes_; i++) amp_sum += amplitude_buffer_[i];
+    update_idle_baselines(get_last_turbulence(), last_phase_turbulence_, amp_sum);
 }
 
 float BaseDetector::get_idle_mean_turbulence() const {
@@ -508,6 +539,8 @@ float BaseDetector::get_idle_amplitude_baseline() const {
 }
 
 float BaseDetector::get_idle_breathing_baseline() const {
+    // Not seeded yet: report +inf so "breath > factor x baseline" checks stay false
+    if (!idle_breath_ready_) return std::numeric_limits<float>::infinity();
     return (idle_breathing_baseline_ > IDLE_BREATH_FLOOR) ? idle_breathing_baseline_ : IDLE_BREATH_FLOOR;
 }
 

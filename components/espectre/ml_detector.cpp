@@ -83,6 +83,9 @@ void MLDetector::update_state() {
         }
         state_ = new_state;
     }
+
+    // Update idle-gated baselines after state transition (presence / breathing logic)
+    update_idle_baselines_from_last_packet();
 }
 
 bool MLDetector::set_threshold(float threshold) {
