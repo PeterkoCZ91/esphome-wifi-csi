@@ -24,6 +24,7 @@
 ## Adding a new node
 
 1. Copy the appropriate template (`espectre-c5-template.yaml` or `espectre-c6-template.yaml`)
+   to `espectre-<name>.yaml` — node configs matching `espectre-*.yaml` are gitignored, only the templates are tracked
 2. Change `name:` and `friendly_name:` in the `esphome:` block
 3. For pairwise C5 RX nodes, set `peer_mac:` to the TX node's MAC:
    ```yaml
